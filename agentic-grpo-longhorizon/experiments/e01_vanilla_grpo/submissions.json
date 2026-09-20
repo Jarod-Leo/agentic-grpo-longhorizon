@@ -9,13 +9,14 @@
     "state": "COMPLETED; accepted=true"
   },
   "readiness": {
-    "job_id": "162771",
-    "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/readiness-v3",
+    "job_id": "162772",
+    "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/readiness-v4",
     "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/source-ready-v3",
     "entry": "scripts/train/grpo/verify_qwen3.sh",
     "dependency": null,
     "baseline_accepted_job": "162649",
-    "cuda_cache_path": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/runs/grpo_probe_20260919/cuda-cache"
+    "cuda_cache_path": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/runs/grpo_probe_20260919/cuda-cache",
+    "node": "gpu-pro6000-11"
   },
   "superseded": [
     {
@@ -34,6 +35,16 @@
       "dependency": "162649",
       "cuda_cache_path": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/runs/grpo_probe_20260919/cuda-cache",
       "state": "FAILED before first update: missing temperature metadata; no checkpoints"
+    },
+    {
+      "job_id": "162771",
+      "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/readiness-v3",
+      "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/source-ready-v3",
+      "entry": "scripts/train/grpo/verify_qwen3.sh",
+      "dependency": null,
+      "baseline_accepted_job": "162649",
+      "cuda_cache_path": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/runs/grpo_probe_20260919/cuda-cache",
+      "state": "FAILED at tokenizer load on gpu-pro6000-3: local model directory not recognized; no rollouts or updates"
     }
   ]
 }

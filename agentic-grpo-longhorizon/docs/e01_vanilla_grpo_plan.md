@@ -1,6 +1,6 @@
 # E01：Vanilla GRPO 实施与验证计划
 
-状态：E00 v2 已完成并通过验收；E01 已修复温度元数据缺失，作业 162771 重新提交三步训练、恢复与评测验证。正式训练步数待全实验预算冻结。
+状态：E00 v2 已完成并通过验收；E01 已修复温度元数据缺失，作业 162772 重新提交三步训练、恢复与评测验证。正式训练步数待全实验预算冻结。
 
 ## 实验边界
 
@@ -73,7 +73,7 @@ GPU 提交记录：
 | 作业 | Job ID | 工作 | 输出目录（相对主项目） |
 | --- | --- | --- | --- |
 | 新 E00（已通过） | 162649 | 原始模型，v2 输入，train 40×8 | `experiments/e00_qwen3_baseline/protocol-v2-ready-v1/eval/` |
-| E01 readiness（重提） | 162771 | continuous 3 步 → 从 step 2 resume → continuous step 3 评测 | `experiments/e01_vanilla_grpo/readiness-v3/` |
+| E01 readiness（重提） | 162772 | continuous 3 步 → 从 step 2 resume → continuous step 3 评测 | `experiments/e01_vanilla_grpo/readiness-v4/` |
 
 E00 作业 162649 已成功完成，320 条轨迹验收全部通过；新 E01 作业在确认基线通过后直接提交。两者均为单 PRO 6000、最长 2 小时的正式 sbatch 作业。提交记录见 `experiments/e01_vanilla_grpo/submissions.json`。这些是验证作业，提交成功不等于训练/恢复/评测已全部通过，也不代表已开始正式预算训练。
 
@@ -83,7 +83,7 @@ E00 作业 162649 已成功完成，320 条轨迹验收全部通过；新 E01 �
 
 ```bash
 squeue --me
-sacct -j 162649,162771 --format=JobID,State,Elapsed,ExitCode
+sacct -j 162649,162772 --format=JobID,State,Elapsed,ExitCode
 ```
 
 Git 同步目标：`https://github.com/Jarod-Leo/agentic-grpo-longhorizon.git`。当前执行目录为部署副本；Git 工作树位于 `experiments/e01_vanilla_grpo/github-worktree/`，代码同步使用 `e01-vanilla-grpo` 分支，原始轨迹、缓存和 checkpoint 不推送；保留小型验收汇总、提交记录及文档。
@@ -101,6 +101,8 @@ Git 同步目标：`https://github.com/Jarod-Leo/agentic-grpo-longhorizon.git`�
 
 新增回归覆盖异步 rollout、批次 concat/union、bypass 处理及实际 CPU actor 更新，使用非 1.0 温度检查传递是否正确，核对有限梯度与真实参数变化；另检查评测温度。CPU 预检 **162768** 完成，**29 项测试通过**，配置与实际 tokenizer 检查通过，修改文件的 Ruff check / format --check 均通过。
 
-新作业 **162771** 使用 `source-ready-v3`，相比上一快照仅变更 `verl/verl/experimental/agent_loop/agent_loop.py` 和对应回归测试。失败运行没有可恢复的 checkpoint，因此从原始模型和 seed 42 的 LoRA 初始化重新执行三步验证；输出使用 `readiness-v3`，历史失败记录保留。此提交仍不代表 GPU 完整链路已通过。
+新作业 **162772** 使用 `source-ready-v3`，相比上一快照仅变更 `verl/verl/experimental/agent_loop/agent_loop.py` 和对应回归测试。失败运行没有可恢复的 checkpoint，因此从原始模型和 seed 42 的 LoRA 初始化重新执行三步验证；输出使用 `readiness-v4`，历史失败记录保留。此提交仍不代表 GPU 完整链路已通过。
 
 已通过的 E00 v2 结果：40 train 任务、320 条轨迹、56 次成功；Pass@1=17.50%，Pass^4=2.86%，Pass@4=38.04%。验收汇总和报告位于 `experiments/e00_qwen3_baseline/protocol-v2-ready-v1/eval/`。此次修复仅补充训练消费的元数据，沿用已通过的基线。
+
+节点补充：温度修复后的第一次提交 162771 被分配到 `gpu-pro6000-3`，该节点的 tokenizer 加载器未能识别已有 HDD 模型目录，触发 HFValidationError；未生成轨迹或执行更新。当前提交 **162772** 使用同一 `source-ready-v3`，指定 E00 已验证可读取模型的 `gpu-pro6000-11`，输出改为 `readiness-v4`。此资源调整不改变实验配置或代码；节点满载时由 Slurm 排队。
