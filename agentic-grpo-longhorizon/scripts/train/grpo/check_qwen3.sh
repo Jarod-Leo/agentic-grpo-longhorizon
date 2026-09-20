@@ -24,6 +24,22 @@ def config(directory, name, output):
     return resolved
 train=config('configs/train/grpo','qwen3_mimo','train_config.yaml')
 eval_config=config('configs/eval/qwen3','eval_qwen3','eval_config.yaml')
+fast=config('configs/train/grpo','qwen3_unpad','fast_config.yaml')
+assert fast['actor_rollout_ref']['model']['use_remove_padding']
+assert fast['actor_rollout_ref']['actor']['use_dynamic_bsz']
+assert fast['actor_rollout_ref']['actor']['ppo_max_token_len_per_gpu']==32768
+assert fast['actor_rollout_ref']['actor']['loss_agg_mode']=='seq-mean-token-mean'
+fast['actor_rollout_ref']['model']['use_remove_padding']=train['actor_rollout_ref']['model']['use_remove_padding']
+for field in ['use_dynamic_bsz','ppo_max_token_len_per_gpu','loss_agg_mode','use_remove_padding']:
+    fast['actor_rollout_ref']['actor'][field]=train['actor_rollout_ref']['actor'][field]
+# veRL propagates actor performance settings into these shared defaults.
+for section in ['ref','rollout']:
+    for field in ['log_prob_use_dynamic_bsz','log_prob_max_token_len_per_gpu']:
+        fast['actor_rollout_ref'][section][field]=train['actor_rollout_ref'][section][field]
+for section, fields in [('critic',['use_dynamic_bsz','loss_agg_mode']),('reward_model',['use_dynamic_bsz'])]:
+    for field in fields:
+        fast[section][field]=train[section][field]
+assert fast==train, 'Unexpected scientific configuration difference'
 assert train['actor_rollout_ref']['model']['lora_init_seed']==42
 assert train['actor_rollout_ref']['rollout']['temperature']==1.0
 assert not train['actor_rollout_ref']['actor']['use_kl_loss']

@@ -144,3 +144,17 @@ def test_async_bypass_without_kl_updates_actor_on_cpu(monkeypatch):
     assert all(np.isfinite(metrics["actor/grad_norm"]))
     assert metrics["actor/grad_norm"][0] > 0
     assert torch.count_nonzero(actor.actor_module.weight) > 0
+
+
+def test_dynamic_microbatch_preserves_per_trajectory_loss_and_gradient():
+    """Variable-length trajectories retain the old microbatch=1 weighting."""
+    from verl.trainer.ppo.core_algos import agg_loss
+
+    mask = torch.tensor([[1.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0], [1.0, 0.0, 1.0, 0.0], [1.0, 1.0, 1.0, 0.0]])
+    values = torch.arange(16, dtype=torch.float64).reshape(4, 4).requires_grad_()
+    reference = sum(agg_loss(values[i : i + 1], mask[i : i + 1], "token-mean") / 4 for i in range(4))
+    expected_grad = torch.autograd.grad(reference, values)[0]
+    for groups in [[[0, 1, 2, 3]], [[0, 2], [1, 3]], [[2], [0, 1, 3]]]:
+        actual = sum(agg_loss(values[group], mask[group], "seq-mean-token-mean") * len(group) / 4 for group in groups)
+        torch.testing.assert_close(actual, reference)
+        torch.testing.assert_close(torch.autograd.grad(actual, values)[0], expected_grad)

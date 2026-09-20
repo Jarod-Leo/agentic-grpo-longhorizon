@@ -135,3 +135,18 @@ bash scripts/eval/eval_qwen3.sh
 单步 GPU 验证作业 **162833**：单 PRO6000、30 分钟上限、4 tasks × 8 rollouts、seed42、从原始模型初始化；`afterok:162772` 且依赖失效自动取消，避免与当前验证争用 MiMo 额度。冻结源码 `experiments/e01_vanilla_grpo/source-unpad-v2`，输出 `experiments/e01_vanilla_grpo/unpad-smoke-v1/train`。source-unpad-v1 是未提交的配置草稿，v2 是实际提交版本。现阶段仅确认提交成功，GPU 兼容性、梯度、显存和耗时尚待验证；默认训练配置暂不切换。通过后对比 actor/update 耗时及实际有效 token 数，保留 rollout 随机性对端到端比较的限制。
 
 GPU 的短时采样覆盖恢复初始化阶段：曾见 0%（加载/编译）及 100%（约 58 W、memory utilization 0%）。这些瞬时值不能证明有效算力满载；判断加速以阶段耗时和更新吞吐为准。
+
+
+## 动态微批测速：32768 → 24576 → 20480
+
+用户更新了执行顺序：先测 32768，只有明确的 GPU OOM 才降到 24576，再 OOM 才降到 20480；首个成功档位即停止，不再按显存占用从低向高扫描。旧作业 162833 已取消。原 162772 已成功完成连续训练、恢复检查和 320 条 train 评测，验收均通过；step-3 独立评测 Pass@1=17.1875%、Pass^4=2.9286%、Pass@4=34.5714%，不能据单次小规模验证推断效果优劣。
+
+`qwen3_unpad.yaml` 开启 remove-padding 与 dynamic microbatch，初始 `actor.ppo_max_token_len_per_gpu=32768`，保留 FlashAttention2。框架依据实际 token 数和长度负载组织微批；预算是分组参数，不保证各微批实际 token 总数绝不超过该值。`loss_agg_mode=seq-mean-token-mean` 保持原 microbatch=1、token-mean 累积时每条轨迹等权，变长轨迹损失与梯度一致性有 CPU 测试覆盖。32 条轨迹、训练 seed、优化器更新次数及科学配置保持原设定。
+
+共用测速入口 `scripts/train/grpo/benchmark_qwen3.sh` 调用现有训练脚本，不复制训练逻辑。每档全新初始化、1 步，最多三档；单档超时 25 分钟，整个 Slurm 作业上限 2 小时。只有 CUDA OOM 明确日志触发回退；API、CPU 内存、正确性和超时问题停止任务。GPU 每秒采样，汇总 rollout、actor update、step、checkpoint、总墙钟、启动及其他开销、有效 token 数、设备显存峰值与 PyTorch allocated/reserved 峰值。`performance.json`/`performance.md` 保存结果，原始采样在每档 `gpu.csv`。
+
+SSD 125.7/150 GB，用户明确允许清理本次测速的完整 checkpoint。仅在该档成功验收后，由 `CLEAN_BENCHMARK_CHECKPOINTS=1` 删除该新输出目录中的 model/optim/extra_state 三个 rank-0 文件，保留 LoRA adapter、配置、日志、测速结果及删除记录；既有 E01 checkpoint 不动。验收后清理意味着本次测速产物只保留 adapter，不能当成完整训练恢复点。失败档保留现场且不会继续占用 checkpoint 保存空间，除非发生保存阶段故障（此类错误不会触发 OOM 回退）。
+
+验证：四种轻量模拟检查覆盖首档成功、一次/两次 OOM 回退、非 OOM 停止及 adapter 保留。CPU 预检首次运行 30 tests passed，但配置差异断言未计入 veRL 自动继承的性能字段，已修正预检并使用新快照重跑；未修改 veRL 生产实现。GPU 实测结果以新作业生成的 performance 文件为准，提交成功不代表已验证提速。
+
+CPU 预检 162930 已完成：30 tests passed，配置/tokenizer 检查通过。GPU 测速作业 **162932** 已提交，快照 `source-dynamic-v2`，输出 `dynamic-smoke-v1`，最大 2 GPU 小时。两项前置作业均已成功完成，Slurm 不再接受其历史依赖，核验后直接提交。

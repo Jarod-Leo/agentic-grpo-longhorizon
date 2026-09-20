@@ -1,0 +1,15 @@
+{
+  "operational_checks_passed": true,
+  "learning_signal_verified": true,
+  "checks": {
+    "same_initial_adapter": true,
+    "continuous_adapter_finite": true,
+    "continuous_lora_b_nonzero": 22413312,
+    "continuous_optimizer_scheduler_step": 3,
+    "resume_adapter_finite": true,
+    "resume_lora_b_nonzero": 22413312,
+    "resume_optimizer_scheduler_step": 3,
+    "same_step3_tasks_and_dataloader": true
+  },
+  "note": "MiMo outputs may differ after resume; rollout equality is not required."
+}

@@ -16,7 +16,8 @@
     "dependency": null,
     "baseline_accepted_job": "162649",
     "cuda_cache_path": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/runs/grpo_probe_20260919/cuda-cache",
-    "node": "gpu-pro6000-11"
+    "node": "gpu-pro6000-11",
+    "state": "COMPLETED; continuous, resume and eval_step3 accepted; readiness checks passed"
   },
   "superseded": [
     {
@@ -58,6 +59,23 @@
     "dependency": "afterok:162772",
     "node": "gpu-pro6000-11",
     "purpose": "Measure native remove-padding actor update; no API quota or scientific setting changes",
-    "state": "SUBMITTED; validation pending"
+    "state": "CANCELLED by user request; replaced by dynamic microbatch benchmark"
+  },
+  "dynamic_benchmark": {
+    "job_id": "162932",
+    "cpu_check_job": "162930",
+    "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/source-dynamic-v2",
+    "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/dynamic-smoke-v1",
+    "entry": "scripts/train/grpo/benchmark_qwen3.sh",
+    "token_budgets": [
+      32768,
+      24576,
+      20480
+    ],
+    "fallback": "GPU OOM only; stop at first accepted trial",
+    "clean_new_full_checkpoints": true,
+    "dependency": null,
+    "dependency_note": "162930 and 162772 already completed successfully; Slurm rejected historical afterok dependency, submitted directly after verification",
+    "state": "SUBMITTED; GPU measurements pending"
   }
 }
