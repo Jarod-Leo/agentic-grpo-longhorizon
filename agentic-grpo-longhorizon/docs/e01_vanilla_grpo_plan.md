@@ -122,3 +122,16 @@ bash scripts/eval/eval_qwen3.sh
 额外参数继续传给 Hydra；`RUN_DIR`、`RESUME_FROM`、`ADAPTER_PATH`、`STEPS`、`SAMPLES` 等已有环境参数保持兼容，旧 `run_qwen3.sh train|eval` 调用也仍可使用。训练超参数继续在 YAML 中修改。
 
 本次通过 Bash 语法检查和 8 项模拟入口检查，覆盖训练、评测、旧调用方式、恢复、adapter、训练失败和汇总失败的退出处理；未增加 GPU 测试作业。已提交的 162772 仍使用原 `source-ready-v3` 固定快照，不改变该作业脚本，也不因这次等价整理重新提交。
+
+
+## 2026-09-20 加速验证
+
+作业 162772 的连续三步训练已完成，continuous/summary.json 的 accepted=true；恢复和评测尚未完成。前三步 rollout 分别约 313/391/250 秒，actor 更新约 250/250/252 秒，checkpoint 保存各约 51 秒。564 次 MiMo 请求均为 HTTP 200，单请求平均 API 延迟 5.06 秒、限流等待 7.75 秒；并发请求的等待之和不能当成串行墙钟耗时。用户已确认实际额度就是 100 RPM / 1000 万 TPM，保持该限流配置，不通过增加 worker 绕过额度。
+
+当前 remove-padding 为 false，agent loop 将 prompt/response 补齐到 8192+12288=20480 token，而各步平均有效总长度约 5646/6284/5574。使用 veRL 原生 `model.use_remove_padding=true` 可跳过 padding 计算；不能把 token 长度比例直接当成整体加速比。训练显存峰值约 76.3 GiB，目前不同时增加 micro batch 或关闭 checkpointing，以便隔离效果。
+
+新增 `configs/train/grpo/qwen3_unpad.yaml` 复用 ppo_trainer/qwen3_common。训练入口通过 `QWEN3_CONFIG` 选择配置，默认仍为 qwen3_mimo。Hydra compose 检查确认两个配置仅 model.use_remove_padding 不同；shell 语法检查通过。没有修改 veRL 实现，也不改在跑快照。
+
+单步 GPU 验证作业 **162833**：单 PRO6000、30 分钟上限、4 tasks × 8 rollouts、seed42、从原始模型初始化；`afterok:162772` 且依赖失效自动取消，避免与当前验证争用 MiMo 额度。冻结源码 `experiments/e01_vanilla_grpo/source-unpad-v2`，输出 `experiments/e01_vanilla_grpo/unpad-smoke-v1/train`。source-unpad-v1 是未提交的配置草稿，v2 是实际提交版本。现阶段仅确认提交成功，GPU 兼容性、梯度、显存和耗时尚待验证；默认训练配置暂不切换。通过后对比 actor/update 耗时及实际有效 token 数，保留 rollout 随机性对端到端比较的限制。
+
+GPU 的短时采样覆盖恢复初始化阶段：曾见 0%（加载/编译）及 100%（约 58 W、memory utilization 0%）。这些瞬时值不能证明有效算力满载；判断加速以阶段耗时和更新吞吐为准。

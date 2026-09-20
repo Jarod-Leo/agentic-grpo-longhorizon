@@ -46,5 +46,18 @@
       "cuda_cache_path": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/runs/grpo_probe_20260919/cuda-cache",
       "state": "FAILED at tokenizer load on gpu-pro6000-3: local model directory not recognized; no rollouts or updates"
     }
-  ]
+  ],
+  "unpad_smoke": {
+    "job_id": "162833",
+    "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/unpad-smoke-v1",
+    "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/source-unpad-v2",
+    "entry": "scripts/train/grpo/run_qwen3.sh",
+    "config": "qwen3_unpad",
+    "steps": 1,
+    "samples_per_task": 8,
+    "dependency": "afterok:162772",
+    "node": "gpu-pro6000-11",
+    "purpose": "Measure native remove-padding actor update; no API quota or scientific setting changes",
+    "state": "SUBMITTED; validation pending"
+  }
 }

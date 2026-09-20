@@ -1,0 +1,13 @@
+# Performance probe: same GRPO settings, skip padding tokens during actor forward.
+hydra:
+  searchpath:
+    - pkg://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - qwen3_common
+  - _self_
+
+actor_rollout_ref:
+  model:
+    use_remove_padding: true
