@@ -16,7 +16,8 @@ export PYTHONPATH="$REPO/../verl:$REPO/../tau-bench:$REPO${PYTHONPATH:+:$PYTHONP
 umask 077
 mkdir -p "$RUN_DIR" "$RAY_TMPDIR"
 test ! -e "$RUN_DIR/run.json" || { echo "Refusing to overwrite $RUN_DIR" >&2; exit 2; }
-export CUDA_CACHE_PATH=$RUN_DIR/cache/cuda TRITON_CACHE_DIR=$RUN_DIR/cache/triton
+export CUDA_CACHE_PATH=${CUDA_CACHE_PATH:-$RUN_DIR/cache/cuda}
+export TRITON_CACHE_DIR=$RUN_DIR/cache/triton
 export TORCHINDUCTOR_CACHE_DIR=$RUN_DIR/cache/torchinductor VLLM_CACHE_ROOT=$RUN_DIR/cache/vllm
 export PYTHONUNBUFFERED=1 OMP_NUM_THREADS=4 TOKENIZERS_PARALLELISM=false
 export VLLM_USE_V1=1 VLLM_WORKER_MULTIPROC_METHOD=spawn VLLM_LOGGING_LEVEL=INFO

@@ -8,10 +8,21 @@
     "dependency": null
   },
   "readiness": {
-    "job_id": "162650",
-    "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/readiness-v1",
-    "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/source-ready-v1",
+    "job_id": "162652",
+    "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/readiness-v2",
+    "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/source-ready-v2",
     "entry": "scripts/train/grpo/verify_qwen3.sh",
-    "dependency": "162649"
-  }
+    "dependency": "162649",
+    "cuda_cache_path": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/runs/grpo_probe_20260919/cuda-cache"
+  },
+  "superseded": [
+    {
+      "job_id": "162650",
+      "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/readiness-v1",
+      "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/source-ready-v1",
+      "entry": "scripts/train/grpo/verify_qwen3.sh",
+      "dependency": "162649",
+      "state": "CANCELLED before start; reuse validated CUDA cache"
+    }
+  ]
 }
