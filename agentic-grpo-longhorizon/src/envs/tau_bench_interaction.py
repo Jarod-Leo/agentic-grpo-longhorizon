@@ -13,13 +13,20 @@ W4 新增:
 """
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import json
 import logging
+import os
 import re
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
 from verl.interactions.base import BaseInteraction
+
+from src.envs.mimo_client import MimoClient, UserSimulatorAPIError
 
 from src.envs.tau_bench_context import (
     CURRENT_TAU_ENV,
@@ -327,6 +334,27 @@ class TauBenchInteraction(BaseInteraction):
         logger.info(f"[TauBenchInteraction] reward_mode={self.reward_mode}")
 
         self._instance_dict: dict[str, dict] = {}
+        self.user_backend = config.get("user_backend", "litellm")
+        if self.user_backend not in {"litellm", "mimo"}:
+            raise ValueError(f"Unknown user_backend: {self.user_backend}")
+        self.mimo_client = MimoClient(config) if self.user_backend == "mimo" else None
+        self.user_io_pool = ThreadPoolExecutor(max_workers=32) if self.mimo_client else None
+        self.completed_trajectories = set()
+        self.expected_trajectories = int(config.get("expected_trajectories", 32))
+
+    def _trajectory_event(self, event):
+        path = os.environ.get("MIMO_TRAJECTORY_PATH")
+        if self.mimo_client is not None and path:
+            with open(path, "a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"time": time.time(), **event}) + "\n")
+
+    async def _user_io(self, function, *args):
+        if self.user_io_pool is None:
+            return function(*args)
+        context = contextvars.copy_context()
+        return await asyncio.get_running_loop().run_in_executor(
+            self.user_io_pool, context.run, function, *args
+        )
 
     async def start_interaction(
         self,
@@ -351,17 +379,28 @@ class TauBenchInteraction(BaseInteraction):
         from tau_bench.envs import get_env
 
         task_id_int = int(task_id)
-        env = get_env(
-            env_name=self.env_name,
-            user_strategy=self.user_strategy,
-            user_model=self.user_model,
-            user_provider=self.user_provider,
-            user_api_base=self.user_base_url,
-            task_split=self.task_split,
-            task_index=task_id_int,
-        )
-        # τ-bench 的 reset 在 get_env 里已经调过一次,但显式再 reset 一遍稳妥
-        env.reset(task_index=task_id_int)
+        self._trajectory_event({"event": "start", "trajectory_id": instance_id, "task_id": task_id_int})
+        def create_env():
+            user_simulator = None
+            if self.mimo_client is not None:
+                from src.envs.mimo_user_simulator import MimoUserSimulationEnv
+
+                user_simulator = MimoUserSimulationEnv(self.mimo_client, instance_id)
+            env = get_env(
+                env_name=self.env_name,
+                user_strategy=self.user_strategy,
+                user_model=self.user_model,
+                user_provider=self.user_provider,
+                user_api_base=self.user_base_url,
+                task_split=self.task_split,
+                task_index=task_id_int,
+                user_simulator=user_simulator,
+            )
+            # get_env constructs the environment; reset supplies the task instruction.
+            initial_user = env.reset(task_index=task_id_int).observation
+            return env, initial_user
+
+        env, initial_user = await self._user_io(create_env)
 
         state = make_initial_state(task_id_int)
 
@@ -371,7 +410,7 @@ class TauBenchInteraction(BaseInteraction):
         CURRENT_TAU_STATE.set(state)
 
         # 备份引用: finalize 时清理用,以及 generate_response 里 defensive re-set
-        self._instance_dict[instance_id] = {"env": env, "state": state}
+        self._instance_dict[instance_id] = {"env": env, "state": state, "initial_user": initial_user}
 
         logger.debug(
             f"[start_interaction] instance={instance_id[:8]} task_id={task_id_int} "
@@ -467,7 +506,9 @@ class TauBenchInteraction(BaseInteraction):
                 name=RESPOND_ACTION_NAME,
                 kwargs={"content": assistant_content},
             )
-            step_res = env.step(action)
+            step_res = await self._user_io(env.step, action)
+        except UserSimulatorAPIError:
+            raise
         except Exception as e:
             # env 内部 exception(一般是 user simulator 返回异常,或 env 已 done 被重复 step)
             logger.warning(
@@ -544,9 +585,27 @@ class TauBenchInteraction(BaseInteraction):
         else:
             score = outcome + 0.3 * process
 
+        if self.mimo_client is not None and instance_id not in self.completed_trajectories:
+            self.completed_trajectories.add(instance_id)
+            self._trajectory_event({
+                "event": "complete", "trajectory_id": instance_id, "task_id": state["task_id"],
+                "score": score, "user_turns": state["num_user_turns"],
+                "tool_calls": state["num_tool_calls"], "contaminated": state.get("contaminated", False),
+            })
+            print(
+                f"MIMO rollout progress {len(self.completed_trajectories)}/{self.expected_trajectories} "
+                f"task_id={state['task_id']}", flush=True,
+            )
+
         return {"score": score, "outcome_score": outcome, "process_score": process}
+
+    def initial_user_message(self, instance_id: str) -> str:
+        """Return the reset observation without another simulator request."""
+        return self._instance_dict[instance_id]["initial_user"]
 
     async def finalize_interaction(self, instance_id: str, **kwargs) -> None:
         """Trajectory 结束时清理 _instance_dict 避免内存泄漏"""
-        self._instance_dict.pop(instance_id, None)
-        # contextvar 随 asyncio task 死亡自动释放,不需要显式 reset
+        instance = self._instance_dict.pop(instance_id, None)
+        if instance is not None and CURRENT_TAU_ENV.get() is instance["env"]:
+            CURRENT_TAU_ENV.set(None)
+            CURRENT_TAU_STATE.set(None)

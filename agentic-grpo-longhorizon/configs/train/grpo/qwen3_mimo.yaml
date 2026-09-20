@@ -1,0 +1,9 @@
+# E01: shared Qwen3/MiMo vanilla GRPO; fixed three-step readiness budget.
+hydra:
+  searchpath:
+    - pkg://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - qwen3_common
+  - _self_

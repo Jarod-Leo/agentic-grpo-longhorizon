@@ -5,7 +5,7 @@ from hashlib import sha256
 from tau_bench.envs.tool import Tool
 from typing import Any, Callable, Dict, List, Type, Optional, Set, Union, Tuple
 
-from tau_bench.envs.user import load_user, UserStrategy
+from tau_bench.envs.user import load_user, UserStrategy, BaseUserSimulationEnv
 from tau_bench.types import (
     Action,
     Task,
@@ -54,6 +54,7 @@ class Env(object):
         user_provider: Optional[str] = None,
         user_api_base: Optional[str] = None,
         task_index: Optional[int] = None,
+        user_simulator: Optional[BaseUserSimulationEnv] = None,
     ) -> None:
         super().__init__()
         self.data_load_func = data_load_func
@@ -71,7 +72,7 @@ class Env(object):
         self.task = tasks[self.task_index]
         self.wiki = wiki
         self.rules = rules
-        self.user = load_user(
+        self.user = user_simulator if user_simulator is not None else load_user(
             user_strategy=user_strategy, model=user_model, provider=user_provider, api_base=user_api_base
         )
         self.actions: List[Action] = []
@@ -161,5 +162,5 @@ class Env(object):
                     r_outputs = 0.0
                     reward = 0.0
             info = RewardOutputInfo(r_outputs=r_outputs, outputs=outputs)
-            
+
         return RewardResult(reward=reward, info=info, actions=actions)

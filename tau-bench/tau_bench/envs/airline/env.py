@@ -6,7 +6,7 @@ from tau_bench.envs.airline.tools import ALL_TOOLS
 from tau_bench.envs.airline.wiki import WIKI
 from tau_bench.envs.base import Env
 from typing import Optional, Union
-from tau_bench.envs.user import UserStrategy
+from tau_bench.envs.user import UserStrategy, BaseUserSimulationEnv
 
 
 class MockAirlineDomainEnv(Env):
@@ -18,6 +18,7 @@ class MockAirlineDomainEnv(Env):
         user_api_base: Optional[str] = None,
         task_split: str = "test",
         task_index: Optional[int] = None,
+        user_simulator: Optional[BaseUserSimulationEnv] = None,
     ):
         match task_split:
             case "test":
@@ -25,6 +26,7 @@ class MockAirlineDomainEnv(Env):
             case _:
                 raise ValueError(f"Unknown task split: {task_split}")
         super().__init__(
+            user_simulator=user_simulator,
             data_load_func=load_data,
             tools=ALL_TOOLS,
             tasks=tasks,

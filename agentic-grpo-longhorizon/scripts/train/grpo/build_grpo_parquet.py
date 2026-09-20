@@ -9,7 +9,7 @@ Usage:
 
 Design: patch v2 §3.4
 - Each row = one task, rollout.n=4 expands at runtime by veRL
-- prompt column: only system message (date grounding), user msg from Interaction
+- prompt column: airline policy and date context; initial user from Interaction
 - extra_info: index, task_id, split, interaction_kwargs
 - No traj_uid column (veRL repeat mechanism makes it non-unique)
 """
@@ -27,7 +27,11 @@ while not (PROJECT_ROOT / "src").is_dir():
     PROJECT_ROOT = PROJECT_ROOT.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-SYSTEM_PROMPT = (
+from tau_bench.envs.airline.wiki import WIKI
+
+PROTOCOL = "airline-policy-initial-user-v2"
+
+SYSTEM_PROMPT = WIKI + "\n\n" + (
     "# Current Date Context\n"
     "The current date is 2024-05-15 (Wednesday). "
     "When users mention dates without specifying the year, "
@@ -45,6 +49,7 @@ def build_rows(task_ids: list[int], split: str) -> list[dict]:
         rows.append({
             "prompt": [{"role": "system", "content": SYSTEM_PROMPT}],
             "extra_info": {
+                "protocol": PROTOCOL,
                 "index": idx,
                 "task_id": tid,
                 "split": split,

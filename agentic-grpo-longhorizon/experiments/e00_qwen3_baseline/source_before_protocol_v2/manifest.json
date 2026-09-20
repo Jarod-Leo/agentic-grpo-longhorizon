@@ -1,0 +1,13 @@
+{
+  "reason": "Historical E00 before initial-user and policy repair",
+  "sha256": {
+    "agentic-grpo-longhorizon/src/envs/audited_tool_agent_loop.py": "42310311a9c73829d4e61ae193129e0ede750b412583b3a0759506bbf3c31fd4",
+    "agentic-grpo-longhorizon/src/envs/baseline_eval_agent_loop.py": "dce8b6c94c3ab9a743f1527f4ed87ab5aa3e99a38617c61fbdf2ea1a67d91b08",
+    "agentic-grpo-longhorizon/src/envs/tau_bench_interaction.py": "f6b4680655e6c75dbddbf2a9f89622e772c89248e9108266775df79002f301be",
+    "agentic-grpo-longhorizon/scripts/train/grpo/build_grpo_parquet.py": "7f9d1a647040a6c1ea13ac7defdd4a951becbbe1820518ca5b878122e1c2abbd",
+    "agentic-grpo-longhorizon/scripts/eval/summarize_e00.py": "950bcfbe420c4a9f76a53cabc6c0cbc1f62ddcc4bb8ca31ed076585c31f425c2",
+    "agentic-grpo-longhorizon/scripts/eval/eval_e00_qwen3.sh": "ad8f90b6c246433f4d92f684a45327cf32c0fc9a8684101828d503585c352f7b",
+    "agentic-grpo-longhorizon/configs/train/grpo/qwen3_mimo.yaml": "6ff419fd3e27dc95177123e7fd4fabfc0d0e4b8f404abdc546dd9a6d3a640135",
+    "agentic-grpo-longhorizon/configs/eval/e00/eval_qwen3.yaml": "f4fd922c9d1240f23c33f6c15648ac0327dfd08b9756767ab70a6d1424a02606"
+  }
+}

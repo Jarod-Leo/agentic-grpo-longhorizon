@@ -246,7 +246,15 @@ class FileLogger:
 
     def log(self, data, step):
         data = {"step": step, "data": data}
-        self.fp.write(json.dumps(data) + "\n")
+        self.fp.write(json.dumps(data, default=self._json_default) + "\n")
+        self.fp.flush()
+
+    @staticmethod
+    def _json_default(value):
+        # Training metrics can contain Torch tensors or NumPy scalars/arrays.
+        if hasattr(value, "tolist"):
+            return value.tolist()
+        raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
     def finish(self):
         self.fp.close()

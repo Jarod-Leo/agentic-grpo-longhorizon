@@ -2,7 +2,7 @@
 
 from typing import Optional, Union
 from tau_bench.envs.base import Env
-from tau_bench.envs.user import UserStrategy
+from tau_bench.envs.user import UserStrategy, BaseUserSimulationEnv
 
 
 def get_env(
@@ -13,11 +13,13 @@ def get_env(
     user_provider: Optional[str] = None,
     user_api_base: Optional[str] = None,
     task_index: Optional[int] = None,
+    user_simulator: Optional[BaseUserSimulationEnv] = None,
 ) -> Env:
     if env_name == "retail":
         from tau_bench.envs.retail import MockRetailDomainEnv
 
         return MockRetailDomainEnv(
+            user_simulator=user_simulator,
             user_strategy=user_strategy,
             user_model=user_model,
             task_split=task_split,
@@ -29,6 +31,7 @@ def get_env(
         from tau_bench.envs.airline import MockAirlineDomainEnv
 
         return MockAirlineDomainEnv(
+            user_simulator=user_simulator,
             user_strategy=user_strategy,
             user_model=user_model,
             task_split=task_split,

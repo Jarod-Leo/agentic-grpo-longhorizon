@@ -20,13 +20,13 @@ from enum import Enum
 from typing import Any, Optional
 from uuid import uuid4
 
+# [W5 PRM-Lite] 导入 assistant content 记录函数
+from src.envs.tau_bench_interaction import record_assistant_content
+
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
 from verl.experimental.agent_loop.utils import add_generation_prompt_for_gpt_oss, format_gpt_oss_tool_response_manually
 from verl.interactions.base import BaseInteraction
-
-# [W5 PRM-Lite] 导入 assistant content 记录函数
-from src.envs.tau_bench_interaction import record_assistant_content
 from verl.interactions.utils.interaction_registry import initialize_interactions_from_config
 from verl.tools.schemas import ToolResponse
 from verl.tools.utils.tool_registry import initialize_tools_from_config
@@ -204,13 +204,15 @@ class ToolAgentLoop(AgentLoopBase):
             metrics=agent_data.metrics,
             extra_fields={},
         )
-        output.extra_fields.update({
-            "turn_scores": agent_data.turn_scores,
-            "tool_rewards": agent_data.tool_rewards,
-            "reasoning_tokens_per_turn": agent_data.reasoning_tokens_per_turn,
-            "total_tool_calls": agent_data.total_tool_calls,
-            "total_errors": agent_data.total_errors,
-        })
+        output.extra_fields.update(
+            {
+                "turn_scores": agent_data.turn_scores,
+                "tool_rewards": agent_data.tool_rewards,
+                "reasoning_tokens_per_turn": agent_data.reasoning_tokens_per_turn,
+                "total_tool_calls": agent_data.total_tool_calls,
+                "total_errors": agent_data.total_errors,
+            }
+        )
         if conditional_prm_info:
             output.extra_fields.update(conditional_prm_info)
         return output
@@ -396,7 +398,12 @@ class ToolAgentLoop(AgentLoopBase):
             else:
                 response_ids = await self.loop.run_in_executor(
                     None,
-                    lambda: self.tokenizer.apply_chat_template(add_messages, add_generation_prompt=True, tokenize=True),
+                    lambda: self.tokenizer.apply_chat_template(
+                        add_messages,
+                        add_generation_prompt=True,
+                        tokenize=True,
+                        **self.apply_chat_template_kwargs,
+                    ),
                 )
                 response_ids = response_ids[len(self.system_prompt) :]
         if len(agent_data.response_mask) + len(response_ids) >= self.response_length:
@@ -452,7 +459,12 @@ class ToolAgentLoop(AgentLoopBase):
         else:
             response_ids = await self.loop.run_in_executor(
                 None,
-                lambda: self.tokenizer.apply_chat_template(add_messages, add_generation_prompt=True, tokenize=True),
+                lambda: self.tokenizer.apply_chat_template(
+                    add_messages,
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    **self.apply_chat_template_kwargs,
+                ),
             )
         response_ids = response_ids[len(self.system_prompt) :]
 
@@ -484,6 +496,7 @@ class ToolAgentLoop(AgentLoopBase):
             tool_execution_response, tool_reward, res = await tool.execute(instance_id, tool_args)
         except Exception as e:
             import traceback
+
             logger.warning(f"Error when executing tool: {e}\n{traceback.format_exc()}")
             return (
                 ToolResponse(

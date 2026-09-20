@@ -392,7 +392,7 @@ class AgentLoopWorkerBase:
                 tokenizer=self.tokenizer,
                 processor=self.processor,
             )
-            output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+            output: AgentLoopOutput = await agent_loop.run(sampling_params, trajectory=trajectory, **kwargs)
 
             # Some AgentLoop may have already computed the reward score, e.g SWE-agent.
 
@@ -583,7 +583,9 @@ class AgentLoopWorkerBase:
             else:
                 score_values = scores
 
-            rm_scores[torch.arange(response_mask.size(0)), response_length] = torch.tensor(score_values, dtype=torch.float32)
+            rm_scores[torch.arange(response_mask.size(0)), response_length] = torch.tensor(
+                score_values, dtype=torch.float32
+            )
             batch["rm_scores"] = rm_scores
 
         non_tensor_batch = {

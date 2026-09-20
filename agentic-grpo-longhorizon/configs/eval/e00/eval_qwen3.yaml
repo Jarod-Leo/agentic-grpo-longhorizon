@@ -1,0 +1,141 @@
+# E00：官方 Qwen3-8B 能力基线（仅评测，不训练、不保存）
+#
+# 等价于 cluster_setup/e00_qwen3_baseline/prepare.py 生成的 eval.yaml，
+# 但把运行期才能确定的值改成 ${oc.env:...}，因此可以作为一个静态配置文件提交。
+#
+# 入口是 scripts/eval/eval_e00_qwen3.sh，它负责 export REPO / RUN_DIR / RAY_TMPDIR /
+# EXP_NAME / POLICY_MODEL / EXPECTED_TRAJECTORIES；直接用 main_ppo 启动时必须自行设好。
+hydra:
+  searchpath:
+  - pkg://verl/trainer/config
+  # 固定 Hydra 输出目录，避免在仓库根目录生成 outputs/
+  run:
+    dir: ${oc.env:RUN_DIR}/hydra
+
+defaults:
+- ppo_trainer
+- _self_
+
+data:
+  # val_only=true 下训练分支不会跑，但 _create_dataloader 仍会读 train_files，
+  # 所以必须指向一个真实存在的 parquet。eval_e00_qwen3.sh 会顺手生成这个 30 条的文件。
+  # 注意：experiments/vanilla/*.parquet 是 build_grpo_parquet.py 的产物，仓库里没有，
+  # 不能想当然地引用。
+  train_files: ${oc.env:RUN_DIR}/train-unused.parquet
+  # eval_e00_qwen3.sh 运行时生成：30 train + 10 dev = 40 条，不含 10 条 test
+  val_files: ${oc.env:RUN_DIR}/eval.parquet
+  train_batch_size: 4
+  val_batch_size: 4
+  dataloader_num_workers: 2
+  max_prompt_length: 8192
+  max_response_length: 12288
+  return_raw_chat: true
+  seed: 42
+  tool_config_path: ${oc.env:REPO}/configs/tool_config/tau_bench_airline_tools.yaml
+  apply_chat_template_kwargs:
+    enable_thinking: false
+
+actor_rollout_ref:
+  model:
+    path: ${oc.env:POLICY_MODEL}
+    lora_rank: 0
+    lora_alpha: 32
+    # 与已验收的 162198 保持一致；val_only 下不做反向，该开关不影响结果
+    enable_gradient_checkpointing: true
+    use_fused_kernels: true
+    fused_kernel_options:
+      impl_backend: torch
+    override_config:
+      attn_implementation: flash_attention_2
+  actor:
+    fsdp_config:
+      optimizer_offload: true
+      param_offload: true
+      model_dtype: bf16
+    optim:
+      lr: 0.0
+    use_kl_loss: false
+    use_fused_kernels: true
+    ppo_mini_batch_size: 4
+    ppo_micro_batch_size_per_gpu: 1
+  rollout:
+    name: vllm
+    mode: async
+    agent:
+      default_agent_loop: tool_agent
+      num_workers: 1
+      # 覆写内置的 tool_agent，换成带轨迹落盘 + 终止原因归类的子类
+      agent_loop_config_path: ${oc.env:REPO}/configs/eval/e00/agent_loop.yaml
+    multi_turn:
+      enable: true
+      format: hermes
+      max_user_turns: 15
+      max_assistant_turns: 15
+      tool_config_path: ${oc.env:REPO}/configs/tool_config/tau_bench_airline_tools.yaml
+      interaction_config_path: ${oc.env:REPO}/configs/interaction_config/tau_bench_airline_mimo.yaml
+    n: 8
+    temperature: 0.7
+    top_p: 0.9
+    tensor_model_parallel_size: 1
+    calculate_log_probs: false
+    gpu_memory_utilization: 0.5
+    free_cache_engine: true
+    max_num_seqs: 12
+    max_model_len: 24576
+    max_num_batched_tokens: 24576
+    log_prob_micro_batch_size_per_gpu: 1
+    # 顶层 rollout.seed 不被当前 veRL 的 RolloutConfig 支持（161985 就是死在这），
+    # 必须走 engine_kwargs；vllm_async_server.py:236 的 `**engine_kwargs` 会覆盖默认 seed=0
+    engine_kwargs:
+      vllm:
+        seed: 42
+    val_kwargs:
+      n: 8
+      temperature: 0.7
+      top_p: 0.9
+      top_k: -1
+      do_sample: true
+  ref:
+    fsdp_config:
+      optimizer_offload: true
+      param_offload: true
+      use_fused_kernels: true
+      model_dtype: bf16
+    model:
+      path: ${oc.env:POLICY_MODEL}
+      override_config:
+        attn_implementation: flash_attention_2
+    log_prob_micro_batch_size_per_gpu: 1
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  rollout_correction:
+    bypass_mode: true
+
+trainer:
+  total_epochs: 1
+  total_training_steps: 1
+  # 关键三项：先验证、只验证、然后直接 return（ray_trainer.py:1043-1049）
+  val_before_train: true
+  val_only: true
+  save_freq: -1
+  test_freq: -1
+  resume_mode: disable
+  default_local_dir: ${oc.env:RUN_DIR}/unused-checkpoints
+  validation_data_dir: ${oc.env:RUN_DIR}/validation
+  logger:
+  - console
+  - file
+  project_name: agentic-grpo-longhorizon
+  experiment_name: ${oc.env:EXP_NAME}
+  n_gpus_per_node: 1
+  nnodes: 1
+
+ray_kwargs:
+  ray_init:
+    num_cpus: 4
+    num_gpus: 1
+    include_dashboard: false
+    _temp_dir: ${oc.env:RAY_TMPDIR}
+    object_store_memory: 2147483648

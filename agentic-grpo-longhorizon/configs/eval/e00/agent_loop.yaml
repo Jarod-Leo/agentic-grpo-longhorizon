@@ -1,0 +1,2 @@
+- name: tool_agent
+  _target_: src.envs.baseline_eval_agent_loop.BaselineEvalAgentLoop

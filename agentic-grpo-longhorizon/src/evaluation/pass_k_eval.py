@@ -1,20 +1,24 @@
 """
-pass^k 评测
-对每个 task 独立采样 k 次,计算 pass^k (至少一次成功的比例)
-同时统计 turn efficiency 和 tool call accuracy
+重复轨迹评测。
+
+pass@k 表示 k 次中至少一次成功，pass^k 表示 k 次全部成功。
+同时统计 turn efficiency 和 tool call accuracy。
 """
 from __future__ import annotations
 
+import json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-import json
-from pathlib import Path
-from dataclasses import dataclass, asdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from tqdm import tqdm
 
 from src.envs.tau_bench_wrapper import TauBenchWrapper, TrajectoryResult
+from src.evaluation.pass_metrics import _mean_available, task_pass_metrics
 
 
 def _get_tokenizer(policy_factory):
@@ -24,6 +28,7 @@ def _get_tokenizer(policy_factory):
         model_name = getattr(policy, "model_name", None)
         if model_name:
             from transformers import AutoTokenizer
+
             tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
             print(f"[pass_k_eval] Loaded tokenizer for {model_name}")
             return tok
@@ -35,24 +40,30 @@ def _get_tokenizer(policy_factory):
 def _make_token_counter(tokenizer):
     """返回一个 callable: text -> token count"""
     if tokenizer is not None:
+
         def _count(text: str) -> int:
             try:
                 return len(tokenizer.encode(text, add_special_tokens=False))
             except Exception:
                 return len(text)
+
         return _count
     return len
 
 
 @dataclass
 class EvalReport:
+    metric_schema_version: int
     env_name: str
     num_tasks: int
     num_samples_per_task: int
-    pass_at_1: float           # 任意一次成功
-    pass_hat_1: float          # pass^1: 平均成功率
-    pass_hat_4: float          # pass^4: 连续 4 次都成功的比例(稳定性)
-    pass_hat_8: float
+    pass_at_1: float | None  # 单次尝试的平均成功率
+    pass_at_4: float | None  # 4 次中至少一次成功
+    pass_at_8: float | None  # 8 次中至少一次成功
+    any_success_rate: float | None  # 每个 task 至少一次成功的比例
+    pass_hat_1: float | None  # 兼容字段：pass^1 = 平均成功率
+    pass_hat_4: float | None  # 兼容字段：pass^4 = 4 次全部成功
+    pass_hat_8: float | None  # 兼容字段：pass^8 = 8 次全部成功
     avg_turns: float
     avg_tool_calls: float
     error_rate: float          # trajectory 异常中止的比例
@@ -62,7 +73,7 @@ class EvalReport:
 def run_eval(
     wrapper: TauBenchWrapper,
     policy_factory,                    # callable -> policy instance (thread-safe)
-    num_tasks: Optional[int] = None,
+    num_tasks: int | None = None,
     num_samples_per_task: int = 4,
     max_turns: int = 30,
     num_workers: int = 4,
@@ -73,45 +84,37 @@ def run_eval(
     """
     if num_tasks is None:
         num_tasks = wrapper.get_num_tasks()
-    
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # 每个 (task_idx, sample_idx) 是一个独立 job
     jobs = [(t, s) for t in range(num_tasks) for s in range(num_samples_per_task)]
     results: dict[int, list[TrajectoryResult]] = {t: [] for t in range(num_tasks)}
-    
+
     def _run_one(task_idx: int, sample_idx: int) -> tuple[int, TrajectoryResult]:
         policy = policy_factory()
         # 给同一个 task 不同 sample 设不同 temperature seed
         # (vLLM server 端已经有采样随机性,这里主要是逻辑标记)
         traj = wrapper.run_single_task(task_idx, policy, max_turns=max_turns)
         return task_idx, traj
-    
+
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = [executor.submit(_run_one, t, s) for t, s in jobs]
         for fut in tqdm(as_completed(futures), total=len(jobs), desc="Eval"):
             task_idx, traj = fut.result()
             results[task_idx].append(traj)
-    
-    # 计算 pass^k
-    # pass^k 定义: 对同一个 task 采样 n 次,估计"连续 k 次都成功"的概率
-    # 用 unbiased estimator (HumanEval 里的 pass@k 公式)
+
     import numpy as np
-    
-    def pass_at_k(n: int, c: int, k: int) -> float:
-        """n: 总采样数, c: 成功数, k: pass^k 的 k"""
-        if n - c < k:
-            return 1.0
-        return 1.0 - np.prod(1.0 - k / np.arange(n - c + 1, n + 1))
-    
+
     # 尝试加载 tokenizer（用于精确统计 assistant content tokens）
     tokenizer = _get_tokenizer(policy_factory)
     count_tokens = _make_token_counter(tokenizer)
 
     per_task = []
-    pass_1_list, pass_4_list, pass_8_list = [], [], []
-    pass_at_1_list = []  # 任意一次成功
+    success_rate_list, pass_at_4_list, pass_at_8_list = [], [], []
+    pass_all_4_list, pass_all_8_list = [], []
+    any_success_list = []
     all_turns, all_tool_calls, all_errors = [], [], []
 
     for t in range(num_tasks):
@@ -119,14 +122,17 @@ def run_eval(
         n = len(trajs)
         c = sum(1 for tr in trajs if tr.success)
 
-        p1 = pass_at_k(n, c, 1)
-        p4 = pass_at_k(n, c, 4) if n >= 4 else None
-        p8 = pass_at_k(n, c, 8) if n >= 8 else None
+        metrics = task_pass_metrics(n, c)
+        success_rate = metrics["success_rate"]
+        pass_at = metrics["pass_at_k"]
+        pass_all = metrics["pass_all_k"]
 
-        pass_1_list.append(p1)
-        pass_at_1_list.append(1.0 if c > 0 else 0.0)
-        if p4 is not None: pass_4_list.append(p4)
-        if p8 is not None: pass_8_list.append(p8)
+        success_rate_list.append(success_rate)
+        pass_at_4_list.append(pass_at[4])
+        pass_at_8_list.append(pass_at[8])
+        pass_all_4_list.append(pass_all[4])
+        pass_all_8_list.append(pass_all[8])
+        any_success_list.append(None if n == 0 else 1.0 if c > 0 else 0.0)
 
         traj_dicts = []
         for tr in trajs:
@@ -149,39 +155,56 @@ def run_eval(
             "task_id": t,
             "success_count": c,
             "total_samples": n,
-            "pass^1": p1,
+            "success_rate": success_rate,
+            "pass@1": pass_at[1],
+            "pass@4": pass_at[4],
+            "pass@8": pass_at[8],
+            "pass^1": pass_all[1],
+            "pass^4": pass_all[4],
+            "pass^8": pass_all[8],
+            "any_success": c > 0,
             "avg_turns": np.mean([tr.num_turns for tr in trajs]),
             "trajectories": traj_dicts,
         })
-    
+
+    pass_at_1 = _mean_available(success_rate_list)
     report = EvalReport(
+        metric_schema_version=2,
         env_name=wrapper.env_name,
         num_tasks=num_tasks,
         num_samples_per_task=num_samples_per_task,
-        pass_at_1=float(np.mean(pass_at_1_list)),
-        pass_hat_1=float(np.mean(pass_1_list)),
-        pass_hat_4=float(np.mean(pass_4_list)) if pass_4_list else 0.0,
-        pass_hat_8=float(np.mean(pass_8_list)) if pass_8_list else 0.0,
+        pass_at_1=pass_at_1,
+        pass_at_4=_mean_available(pass_at_4_list),
+        pass_at_8=_mean_available(pass_at_8_list),
+        any_success_rate=_mean_available(any_success_list),
+        pass_hat_1=pass_at_1,
+        pass_hat_4=_mean_available(pass_all_4_list),
+        pass_hat_8=_mean_available(pass_all_8_list),
         avg_turns=float(np.mean(all_turns)),
         avg_tool_calls=float(np.mean(all_tool_calls)),
         error_rate=float(np.mean(all_errors)),
         per_task_results=per_task,
     )
-    
+
     # 保存
     with open(output_dir / "eval_report.json", "w") as f:
         #json.dump(asdict(report), f, indent=2, ensure_ascii=False)
         json.dump(asdict(report), f, indent=2, ensure_ascii=False, default=str)
-    
+
     # 打印摘要
     print(f"\n=== Eval Report: {wrapper.env_name} ===")
     print(f"Tasks: {num_tasks} × Samples: {num_samples_per_task}")
-    print(f"pass@1 (any success): {report.pass_at_1:.3f}")
-    print(f"pass^1 (avg success): {report.pass_hat_1:.3f}")
-    print(f"pass^4 (stability):   {report.pass_hat_4:.3f}")
-    print(f"pass^8 (stability):   {report.pass_hat_8:.3f}")
+    def _format_metric(value: float | None) -> str:
+        return f"{value:.3f}" if value is not None else "N/A"
+
+    print(f"pass@1 (single-attempt mean): {_format_metric(report.pass_at_1)}")
+    print(f"pass@4 (at least one):        {_format_metric(report.pass_at_4)}")
+    print(f"pass@8 (at least one):        {_format_metric(report.pass_at_8)}")
+    print(f"any-success task rate:        {_format_metric(report.any_success_rate)}")
+    print(f"pass^4 (all successful):      {_format_metric(report.pass_hat_4)}")
+    print(f"pass^8 (all successful):      {_format_metric(report.pass_hat_8)}")
     print(f"Avg turns:       {report.avg_turns:.2f}")
     print(f"Avg tool calls:  {report.avg_tool_calls:.2f}")
     print(f"Error rate:      {report.error_rate:.3f}")
-    
+
     return report

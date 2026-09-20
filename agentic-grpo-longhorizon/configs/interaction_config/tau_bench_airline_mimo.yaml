@@ -1,0 +1,18 @@
+interaction:
+  - name: tau_bench_airline
+    class_name: src.envs.tau_bench_interaction.TauBenchInteraction
+    config:
+      env_name: airline
+      task_split: test
+      max_turns: 30
+      reward_mode: binary
+      user_backend: mimo
+      user_strategy: llm
+      user_model: mimo-v2.5
+      user_base_url: https://api.xiaomimimo.com/v1
+      rpm: 100
+      tpm: 10000000
+      max_inflight: 32
+      max_completion_tokens: 1024
+      # 只作为 "MIMO rollout progress N/M" 的分母；训练默认 32，E00 评测由启动脚本设为 320
+      expected_trajectories: ${oc.env:EXPECTED_TRAJECTORIES,32}

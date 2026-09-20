@@ -1,0 +1,21 @@
+hydra:
+  searchpath:
+    - file://${oc.env:REPO}/configs/train/grpo
+    - pkg://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - qwen3_common
+  - _self_
+
+actor_rollout_ref:
+  model:
+    lora_rank: 0
+  rollout:
+    calculate_log_probs: false
+
+trainer:
+  total_training_steps: 1
+  val_before_train: true
+  val_only: true
+  save_freq: -1

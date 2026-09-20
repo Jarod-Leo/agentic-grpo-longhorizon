@@ -45,6 +45,9 @@ lora_rank: 0
 # LoRA scaling factor
 lora_alpha: 16
 
+# Optional reproducible initialization; null preserves the existing RNG behavior.
+lora_init_seed: null
+
 # Target modules for LoRA adaptation
 target_modules: all-linear
 

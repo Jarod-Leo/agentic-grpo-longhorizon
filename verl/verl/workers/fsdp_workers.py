@@ -16,10 +16,12 @@ The main entry point to run the PPO algorithm
 """
 
 import datetime
+import hashlib
 import json
 import logging
 import os
 import warnings
+from contextlib import nullcontext
 from dataclasses import asdict
 from typing import Any, Optional
 
@@ -436,7 +438,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "exclude_modules": convert_to_regular_types(self.config.model.exclude_modules),
                     "bias": "none",
                 }
-                actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
+                init_seed = self.config.model.get("lora_init_seed")
+                with torch.random.fork_rng() if init_seed is not None else nullcontext():
+                    if init_seed is not None:
+                        torch.manual_seed(init_seed)
+                    actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
+                if init_seed is not None and self.rank == 0:
+                    digest = hashlib.sha256()
+                    for name, parameter in sorted(actor_module.named_parameters()):
+                        if parameter.requires_grad:
+                            digest.update(name.encode())
+                            digest.update(parameter.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes())
+                    print("LORA_INITIALIZATION " + json.dumps({"seed": init_seed, "sha256": digest.hexdigest()}))
 
         self.use_orig_params = fsdp_config.get("use_orig_params", False)
         if self.config.actor.get("freeze_vision_tower", False):
