@@ -61,7 +61,7 @@ LoRA 初始化新增可选种子字段，默认 None 保留旧行为；仅在初
 ## 已实现入口与运行记录（2026-09-20）
 
 - 公共配置：`configs/train/grpo/qwen3_common.yaml`；训练配置 `qwen3_mimo.yaml`，评测差异配置 `configs/eval/qwen3/eval_qwen3.yaml`。
-- 公共训练入口：`scripts/train/grpo/run_qwen3.sh train`；公共评测入口：`scripts/eval/eval_qwen3.sh`。评测 adapter 时设置 `ADAPTER_PATH`；三步验证编排为 `scripts/train/grpo/verify_qwen3.sh`。
+- 公共训练入口：`scripts/train/grpo/run_qwen3.sh`；公共评测入口：`scripts/eval/eval_qwen3.sh`。评测 adapter 时设置 `ADAPTER_PATH`；三步验证编排为 `scripts/train/grpo/verify_qwen3.sh`。
 - 历史 `scripts/eval/eval_e00_qwen3.sh` 已收敛为公共评测入口的兼容壳，默认使用 v2 协议。历史 E00 原始脚本与配置保存在 `experiments/e00_qwen3_baseline/source_before_protocol_v2/`；不使用新脚本重新解释旧协议结果。
 - 公共 Slurm 壳：仓库根目录 `cluster_setup/qwen3_shared/run.sbatch`；CPU 预检壳为同目录 `check.sbatch`。作业通过现有 `setup/activate.sh` 加载环境及 `~/.config/cabinagentrl/mimo.env`，不把密钥写入配置或命令。
 - 不可变源码快照：`scripts/train/grpo/snapshot_qwen3_source.py <新目录>`，同时生成 `source_manifest.json`。E00 固定使用 `experiments/e01_vanilla_grpo/source-ready-v1/`，当前 E01 固定使用 `experiments/e01_vanilla_grpo/source-ready-v3/`；运行中的快照禁止修改。
@@ -106,3 +106,19 @@ Git 同步目标：`https://github.com/Jarod-Leo/agentic-grpo-longhorizon.git`�
 已通过的 E00 v2 结果：40 train 任务、320 条轨迹、56 次成功；Pass@1=17.50%，Pass^4=2.86%，Pass@4=38.04%。验收汇总和报告位于 `experiments/e00_qwen3_baseline/protocol-v2-ready-v1/eval/`。此次修复仅补充训练消费的元数据，沿用已通过的基线。
 
 节点补充：温度修复后的第一次提交 162771 被分配到 `gpu-pro6000-3`，该节点的 tokenizer 加载器未能识别已有 HDD 模型目录，触发 HFValidationError；未生成轨迹或执行更新。当前提交 **162772** 使用同一 `source-ready-v3`，指定 E00 已验证可读取模型的 `gpu-pro6000-11`，输出改为 `readiness-v4`。此资源调整不改变实验配置或代码；节点满载时由 Slurm 排队。
+
+
+## 启动入口简化
+
+工作目录中的 `run_qwen3.sh` 已精简为 15 行，`eval_qwen3.sh` 为 8 行：入口只加载公共准备函数、选择训练或评测配置并调用 veRL。环境变量、数据准备、缓存、日志和退出验收集中维护在 `scripts/train/grpo/qwen3_runtime.sh`，训练与评测共同复用。这里是职责拆分，必要的运行管理逻辑仍然保留。
+
+激活环境并取得 Slurm 资源后，调用方式为：
+
+```bash
+bash scripts/train/grpo/run_qwen3.sh
+bash scripts/eval/eval_qwen3.sh
+```
+
+额外参数继续传给 Hydra；`RUN_DIR`、`RESUME_FROM`、`ADAPTER_PATH`、`STEPS`、`SAMPLES` 等已有环境参数保持兼容，旧 `run_qwen3.sh train|eval` 调用也仍可使用。训练超参数继续在 YAML 中修改。
+
+本次通过 Bash 语法检查和 8 项模拟入口检查，覆盖训练、评测、旧调用方式、恢复、adapter、训练失败和汇总失败的退出处理；未增加 GPU 测试作业。已提交的 162772 仍使用原 `source-ready-v3` 固定快照，不改变该作业脚本，也不因这次等价整理重新提交。
