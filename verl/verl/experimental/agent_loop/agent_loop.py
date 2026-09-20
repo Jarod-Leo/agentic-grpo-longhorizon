@@ -363,6 +363,8 @@ class AgentLoopWorkerBase:
         outputs = await asyncio.gather(*tasks)
 
         output = self._postprocess(outputs)
+        # Actor updates need the sampling temperature even when log-prob/ref passes are skipped.
+        output.meta_info["temperature"] = sampling_params["temperature"]
         return output
 
     async def _run_agent_loop(

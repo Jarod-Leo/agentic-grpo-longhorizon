@@ -1,18 +1,20 @@
 {
-  "cpu_check_job": "162645",
+  "cpu_check_job": "162768",
   "baseline": {
     "job_id": "162649",
     "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e00_qwen3_baseline/protocol-v2-ready-v1",
     "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/source-ready-v1",
     "entry": "scripts/eval/eval_qwen3.sh",
-    "dependency": null
+    "dependency": null,
+    "state": "COMPLETED; accepted=true"
   },
   "readiness": {
-    "job_id": "162652",
-    "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/readiness-v2",
-    "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/source-ready-v2",
+    "job_id": "162771",
+    "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/readiness-v3",
+    "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/source-ready-v3",
     "entry": "scripts/train/grpo/verify_qwen3.sh",
-    "dependency": "162649",
+    "dependency": null,
+    "baseline_accepted_job": "162649",
     "cuda_cache_path": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/runs/grpo_probe_20260919/cuda-cache"
   },
   "superseded": [
@@ -23,6 +25,15 @@
       "entry": "scripts/train/grpo/verify_qwen3.sh",
       "dependency": "162649",
       "state": "CANCELLED before start; reuse validated CUDA cache"
+    },
+    {
+      "job_id": "162652",
+      "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/readiness-v2",
+      "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/source-ready-v2",
+      "entry": "scripts/train/grpo/verify_qwen3.sh",
+      "dependency": "162649",
+      "cuda_cache_path": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/runs/grpo_probe_20260919/cuda-cache",
+      "state": "FAILED before first update: missing temperature metadata; no checkpoints"
     }
   ]
 }

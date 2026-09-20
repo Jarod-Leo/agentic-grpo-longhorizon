@@ -1,6 +1,6 @@
 # E01：Vanilla GRPO 实施与验证计划
 
-状态：方案已确认；先完成三步训练、恢复与评测验证，正式训练步数待全实验预算冻结。
+状态：E00 v2 已完成并通过验收；E01 已修复温度元数据缺失，作业 162771 重新提交三步训练、恢复与评测验证。正式训练步数待全实验预算冻结。
 
 ## 实验边界
 
@@ -64,18 +64,18 @@ LoRA 初始化新增可选种子字段，默认 None 保留旧行为；仅在初
 - 公共训练入口：`scripts/train/grpo/run_qwen3.sh train`；公共评测入口：`scripts/eval/eval_qwen3.sh`。评测 adapter 时设置 `ADAPTER_PATH`；三步验证编排为 `scripts/train/grpo/verify_qwen3.sh`。
 - 历史 `scripts/eval/eval_e00_qwen3.sh` 已收敛为公共评测入口的兼容壳，默认使用 v2 协议。历史 E00 原始脚本与配置保存在 `experiments/e00_qwen3_baseline/source_before_protocol_v2/`；不使用新脚本重新解释旧协议结果。
 - 公共 Slurm 壳：仓库根目录 `cluster_setup/qwen3_shared/run.sbatch`；CPU 预检壳为同目录 `check.sbatch`。作业通过现有 `setup/activate.sh` 加载环境及 `~/.config/cabinagentrl/mimo.env`，不把密钥写入配置或命令。
-- 不可变源码快照：`scripts/train/grpo/snapshot_qwen3_source.py <新目录>`，同时生成 `source_manifest.json`。E00 固定使用 `experiments/e01_vanilla_grpo/source-ready-v1/`，E01 固定使用 `experiments/e01_vanilla_grpo/source-ready-v2/`；运行中的快照禁止修改。
+- 不可变源码快照：`scripts/train/grpo/snapshot_qwen3_source.py <新目录>`，同时生成 `source_manifest.json`。E00 固定使用 `experiments/e01_vanilla_grpo/source-ready-v1/`，当前 E01 固定使用 `experiments/e01_vanilla_grpo/source-ready-v3/`；运行中的快照禁止修改。
 
-CPU 预检作业 **162645** 已成功：27 项测试通过；训练与评测配置解析成功；使用实际 Qwen3 tokenizer，完整规则、工具与示例用户消息为 **3929 tokens**，非思考后缀正确。此前发现并修复了快照漏带旧划分 fixture、Hydra secondary config 不允许重设 searchpath，以及第三方 stdout 日志污染 YAML 解析的问题。修改的四个 veRL Python 文件已通过 Ruff check 与 format --check。
+初版 CPU 预检作业 **162645** 已成功：27 项测试通过；训练与评测配置解析成功；使用实际 Qwen3 tokenizer，完整规则、工具与示例用户消息为 **3929 tokens**，非思考后缀正确。此前发现并修复了快照漏带旧划分 fixture、Hydra secondary config 不允许重设 searchpath，以及第三方 stdout 日志污染 YAML 解析的问题。修改的四个 veRL Python 文件已通过 Ruff check 与 format --check。
 
 GPU 提交记录：
 
 | 作业 | Job ID | 工作 | 输出目录（相对主项目） |
 | --- | --- | --- | --- |
-| 新 E00 | 162649 | 原始模型，v2 输入，train 40×8 | `experiments/e00_qwen3_baseline/protocol-v2-ready-v1/eval/` |
-| E01 readiness | 162652 | continuous 3 步 → 从 step 2 resume → continuous step 3 评测 | `experiments/e01_vanilla_grpo/readiness-v2/` |
+| 新 E00（已通过） | 162649 | 原始模型，v2 输入，train 40×8 | `experiments/e00_qwen3_baseline/protocol-v2-ready-v1/eval/` |
+| E01 readiness（重提） | 162771 | continuous 3 步 → 从 step 2 resume → continuous step 3 评测 | `experiments/e01_vanilla_grpo/readiness-v3/` |
 
-E01 使用 `afterok:162649` 依赖，基线验收失败时不启动。两者均为单 PRO 6000、最长 2 小时的正式 sbatch 作业。提交记录见 `experiments/e01_vanilla_grpo/submissions.json`。这些是验证作业，提交成功不等于训练/恢复/评测已全部通过，也不代表已开始正式预算训练。
+E00 作业 162649 已成功完成，320 条轨迹验收全部通过；新 E01 作业在确认基线通过后直接提交。两者均为单 PRO 6000、最长 2 小时的正式 sbatch 作业。提交记录见 `experiments/e01_vanilla_grpo/submissions.json`。这些是验证作业，提交成功不等于训练/恢复/评测已全部通过，也不代表已开始正式预算训练。
 
 每个阶段的关键文件：`run.json`（划分与模式）、`run.log`、`eval_trajectories.jsonl`、`tool_audit.jsonl`、`api.jsonl`、`metrics.jsonl`、`summary.json`、`report.md`。三步训练与恢复在 `continuous/` 和 `resume/`；恢复一致性检查为顶层 `readiness.json`；固定 checkpoint 评测为 `eval_step3/summary.json`。只有各阶段验收通过，才能报告完整验证成功。`learning_signal_verified=false` 时还不能宣称已验证有效学习。
 
@@ -83,9 +83,24 @@ E01 使用 `afterok:162649` 依赖，基线验收失败时不启动。两者均�
 
 ```bash
 squeue --me
-sacct -j 162649,162652 --format=JobID,State,Elapsed,ExitCode
+sacct -j 162649,162771 --format=JobID,State,Elapsed,ExitCode
 ```
 
-Git 同步目标：`https://github.com/Jarod-Leo/agentic-grpo-longhorizon.git`。当前执行目录为部署副本；Git 工作树位于 `experiments/e01_vanilla_grpo/github-worktree/`，代码同步使用 `e01-vanilla-grpo` 分支，运行产物、缓存和 checkpoint 不推送。
+Git 同步目标：`https://github.com/Jarod-Leo/agentic-grpo-longhorizon.git`。当前执行目录为部署副本；Git 工作树位于 `experiments/e01_vanilla_grpo/github-worktree/`，代码同步使用 `e01-vanilla-grpo` 分支，原始轨迹、缓存和 checkpoint 不推送；保留小型验收汇总、提交记录及文档。
 
 启动补充：初次 E00 使用空 CUDA 缓存，观察到 NCCL 初始化期间持续生成编译缓存。原待运行 E01 作业 162650 已取消，替换为 162652；新快照允许显式传入 CUDA_CACHE_PATH，并复用历史已验证缓存，减少连续训练、恢复及评测三个进程的重复编译。运行中的 E00 快照保持原样。
+
+
+## 温度元数据故障修复与重提
+
+原 E01 作业 162652 在完成首批 32 条轨迹后、首次 actor 更新前失败，耗时 7 分 8 秒，未保存 checkpoint。错误为 `dp_actor.update_policy` 读取 `data.meta_info["temperature"]` 时触发 KeyError。
+
+根因：异步 `AgentLoopWorkerBase.generate_sequences` 使用 rollout 配置构造采样温度，但 `_postprocess` 输出未携带该温度。旧训练的 `compute_log_prob` 或 KL reference pass 会顺带提供此字段；E01 的 bypass + 无 KL 路径跳过二者，因此缺少元数据。
+
+最小修复：在公共异步 rollout 返回批次上设置 `output.meta_info["temperature"] = sampling_params["temperature"]`。这同时保留训练温度与评测实际使用的温度；不修改 actor 的严格读取、不设隐式默认值，也不改变采样、奖励或算法配置。
+
+新增回归覆盖异步 rollout、批次 concat/union、bypass 处理及实际 CPU actor 更新，使用非 1.0 温度检查传递是否正确，核对有限梯度与真实参数变化；另检查评测温度。CPU 预检 **162768** 完成，**29 项测试通过**，配置与实际 tokenizer 检查通过，修改文件的 Ruff check / format --check 均通过。
+
+新作业 **162771** 使用 `source-ready-v3`，相比上一快照仅变更 `verl/verl/experimental/agent_loop/agent_loop.py` 和对应回归测试。失败运行没有可恢复的 checkpoint，因此从原始模型和 seed 42 的 LoRA 初始化重新执行三步验证；输出使用 `readiness-v3`，历史失败记录保留。此提交仍不代表 GPU 完整链路已通过。
+
+已通过的 E00 v2 结果：40 train 任务、320 条轨迹、56 次成功；Pass@1=17.50%，Pass^4=2.86%，Pass@4=38.04%。验收汇总和报告位于 `experiments/e00_qwen3_baseline/protocol-v2-ready-v1/eval/`。此次修复仅补充训练消费的元数据，沿用已通过的基线。
