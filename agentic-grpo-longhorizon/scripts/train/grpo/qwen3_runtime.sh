@@ -41,9 +41,12 @@ setup_qwen3_run() {
     trap finish_qwen3_run EXIT
     trap 'exit 143' TERM INT
     date +%s > "$RUN_DIR/job_started.epoch"
+    export CHECKPOINT_ROOT=${CHECKPOINT_ROOT:-$RUN_DIR/checkpoints}
     STEPS=${STEPS:-3}
     SAMPLES=${SAMPLES:-8}
     local -a prepare=(--mode "$MODE" --split "${EVAL_SPLIT:-train}" --steps "$STEPS" --samples "$SAMPLES")
+    prepare+=(--save-freq "${SAVE_FREQ:-1}" --eval-freq "${EVAL_FREQ:--1}" --eval-samples "${EVAL_SAMPLES:-8}"
+        --checkpoint-root "$CHECKPOINT_ROOT")
     QWEN3_OVERRIDES=()
     if [ -n "${RESUME_FROM:-}" ]; then
         prepare+=(--resume "$RESUME_FROM")
@@ -60,6 +63,9 @@ setup_qwen3_run() {
     if [ "$MODE" = eval ]; then
         QWEN3_OVERRIDES+=("actor_rollout_ref.rollout.val_kwargs.n=$SAMPLES")
     else
-        QWEN3_OVERRIDES+=("trainer.total_training_steps=$STEPS" "actor_rollout_ref.rollout.n=$SAMPLES")
+        QWEN3_OVERRIDES+=("trainer.total_training_steps=$STEPS" "trainer.total_epochs=$(((STEPS + 9) / 10))"
+            "actor_rollout_ref.rollout.n=$SAMPLES" "trainer.save_freq=${SAVE_FREQ:-1}"
+            "trainer.test_freq=${EVAL_FREQ:--1}" "actor_rollout_ref.rollout.val_kwargs.n=${EVAL_SAMPLES:-8}"
+            "trainer.default_local_dir=$CHECKPOINT_ROOT")
     fi
 }

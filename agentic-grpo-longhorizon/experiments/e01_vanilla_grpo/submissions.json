@@ -76,6 +76,23 @@
     "clean_new_full_checkpoints": true,
     "dependency": null,
     "dependency_note": "162930 and 162772 already completed successfully; Slurm rejected historical afterok dependency, submitted directly after verification",
-    "state": "SUBMITTED; GPU measurements pending"
+    "state": "COMPLETED; 32768 accepted; update=100.84s, step=399.68s; no fallback"
+  },
+  "formal": {
+    "job_id": "163430",
+    "cpu_check_job": "163429",
+    "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/source-formal-v2",
+    "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/formal-seed42-200-v1",
+    "entry": "scripts/train/grpo/run_qwen3_formal.sh",
+    "checkpoint_archive_root": "/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/checkpoints/e01_vanilla_grpo/formal-seed42-200-v1",
+    "steps": 200,
+    "eval_freq": 100,
+    "save_freq": 100,
+    "eval_split": "train",
+    "eval_samples_per_task": 8,
+    "token_budget": 32768,
+    "seed": 42,
+    "time_limit": "36:00:00",
+    "state": "SUBMITTED; not yet completed"
   }
 }

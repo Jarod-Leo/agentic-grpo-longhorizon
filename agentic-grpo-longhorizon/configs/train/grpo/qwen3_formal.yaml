@@ -1,0 +1,17 @@
+# E01 formal run: fresh base model, 200 updates, train-only periodic evaluation.
+hydra:
+  searchpath:
+    - pkg://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - qwen3_common
+  - qwen3_performance
+  - _self_
+
+trainer:
+  total_epochs: 20
+  total_training_steps: 200
+  save_freq: 100
+  test_freq: 100
+  checkpoint_archive_dir: ${oc.env:CHECKPOINT_ARCHIVE_ROOT}

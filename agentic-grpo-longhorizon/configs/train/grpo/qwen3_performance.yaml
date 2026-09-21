@@ -1,0 +1,9 @@
+# Verified single-GPU training performance settings.
+actor_rollout_ref:
+  model:
+    use_remove_padding: true
+  actor:
+    use_dynamic_bsz: true
+    ppo_max_token_len_per_gpu: 32768
+    # Equivalent to token-mean accumulated one trajectory at a time.
+    loss_agg_mode: seq-mean-token-mean

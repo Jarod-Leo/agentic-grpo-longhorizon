@@ -1,6 +1,6 @@
 # E01：Vanilla GRPO 实施与验证计划
 
-状态：E00 v2 已完成并通过验收；E01 已修复温度元数据缺失，作业 162772 重新提交三步训练、恢复与评测验证。正式训练步数待全实验预算冻结。
+状态：E00 v2、E01 三步训练/恢复/独立评测均已通过；动态微批32768单步验收通过。用户批准正式E01训练200步，每100步评测并保存完整checkpoint，HDD长期保留。
 
 ## 实验边界
 
@@ -150,3 +150,18 @@ SSD 125.7/150 GB，用户明确允许清理本次测速的完整 checkpoint。�
 验证：四种轻量模拟检查覆盖首档成功、一次/两次 OOM 回退、非 OOM 停止及 adapter 保留。CPU 预检首次运行 30 tests passed，但配置差异断言未计入 veRL 自动继承的性能字段，已修正预检并使用新快照重跑；未修改 veRL 生产实现。GPU 实测结果以新作业生成的 performance 文件为准，提交成功不代表已验证提速。
 
 CPU 预检 162930 已完成：30 tests passed，配置/tokenizer 检查通过。GPU 测速作业 **162932** 已提交，快照 `source-dynamic-v2`，输出 `dynamic-smoke-v1`，最大 2 GPU 小时。两项前置作业均已成功完成，Slurm 不再接受其历史依赖，核验后直接提交。
+
+
+## 正式 E01：200 步，周期评测与 HDD 归档
+
+用户明确将 E01 正式预算定为 200 步，替代本实验此前未冻结的 20/30/50 步候选；其他实验预算未据此自动确定。使用基础 Qwen3-8B 与相同 seed42/LoRA 初始化，采用已验收的 remove-padding、动态微批32768、轨迹等权损失，保留原 batch=4、rollout n=8、lr=5e-6。40 train / 10 test 划分不变。
+
+`qwen3_formal.yaml`：200步、20 epochs（40个训练任务每轮10个batch）、save_freq=test_freq=100，训练前不额外评测。第100和200步均用40个train任务×8次采样评测，test保持未见。预期训练轨迹6400条、周期评测640条，总计7040。训练与评测共用veRL，轨迹新增validate标志，汇总分别验收与报告，避免同一步训练/评测混成GRPO分组。通用入口根据总步数配置足够epochs，元数据保存评测与checkpoint计划。
+
+归档目录：`/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/checkpoints/e01_vanilla_grpo/formal-seed42-200-v1`。遵循集群活跃IO使用SSD规则，完整checkpoint先写本次SSD输出；模型、优化器、随机状态、scheduler、data loader、adapter全部写完后，通过可选 `trainer.checkpoint_archive_dir` 复制到HDD临时目录，再重命名为正式目录。复制成功后释放本次SSD副本，原位置保留指向归档的链接，兼容既有发现/恢复和验收逻辑。复制失败时保留SSD完整checkpoint并停止，不覆盖已有HDD目录。两份完整checkpoint均长期保留，既有验证checkpoint不动。要再次训练时可按现有恢复入口显式读取对应归档。
+
+Slurm：单PRO6000、gpu-pro6000-11（已验证模型可访问）、36小时上限；不更改共用run.sbatch，提交时覆盖时限。按单步约400秒估算，训练约22.2 GPU小时，另加两次评测、初始化和归档；实际轨迹变长可能增加耗时。MiMo保持100RPM/1000万TPM。正式训练不在OOM后自动改变配置；测速回退入口仅用于测速。
+
+验证包括：原有用例、同一步训练/评测隔离与缺失拒绝、外部checkpoint路径与完整性、归档保留数据/本地链接、复制失败时SSD副本保留。框架Ruff check和format检查通过。正式提交使用冻结快照，运行后不修改其代码。
+
+最终CPU预检 **163429**：33 tests passed，正式配置和7040轨迹元数据检查通过。正式作业 **163430** 已提交；冻结源码 `source-formal-v2`，SSD输出 `experiments/e01_vanilla_grpo/formal-seed42-200-v1/train`。

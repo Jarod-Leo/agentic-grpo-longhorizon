@@ -158,3 +158,37 @@ def test_dynamic_microbatch_preserves_per_trajectory_loss_and_gradient():
         actual = sum(agg_loss(values[group], mask[group], "seq-mean-token-mean") * len(group) / 4 for group in groups)
         torch.testing.assert_close(actual, reference)
         torch.testing.assert_close(torch.autograd.grad(actual, values)[0], expected_grad)
+
+
+def test_checkpoint_archive_preserves_contents_and_local_lookup(tmp_path):
+    from verl.utils.checkpoint.checkpoint_manager import archive_checkpoint
+
+    local = tmp_path / "ssd/global_step_100"
+    local.mkdir(parents=True)
+    (local / "data.pt").write_bytes(b"dataloader")
+    (local / "actor").mkdir()
+    (local / "actor/model.pt").write_bytes(b"model")
+    target = archive_checkpoint(str(local), str(tmp_path / "hdd"))
+    assert local.is_symlink()
+    assert (local / "data.pt").read_bytes() == b"dataloader"
+    assert (local / "actor/model.pt").read_bytes() == b"model"
+    assert str(local.resolve()) == target
+
+
+def test_checkpoint_archive_copy_failure_keeps_ssd_checkpoint(tmp_path, monkeypatch):
+    import pytest
+
+    from verl.utils.checkpoint import checkpoint_manager
+
+    local = tmp_path / "ssd/global_step_100"
+    local.mkdir(parents=True)
+    (local / "data.pt").write_bytes(b"keep")
+
+    def fail_copy(*args, **kwargs):
+        raise OSError("archive unavailable")
+
+    monkeypatch.setattr(checkpoint_manager.shutil, "copytree", fail_copy)
+    with pytest.raises(OSError):
+        checkpoint_manager.archive_checkpoint(str(local), str(tmp_path / "hdd"))
+    assert not local.is_symlink()
+    assert (local / "data.pt").read_bytes() == b"keep"

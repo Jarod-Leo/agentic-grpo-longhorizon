@@ -570,10 +570,7 @@ class RayPPOTrainer:
 
             # Collect split info for per-split validation metrics
             extra_infos = test_batch.non_tensor_batch.get("extra_info", [])
-            batch_splits = [
-                ex.get("split", "unknown") if isinstance(ex, dict) else "unknown"
-                for ex in extra_infos
-            ]
+            batch_splits = [ex.get("split", "unknown") if isinstance(ex, dict) else "unknown" for ex in extra_infos]
             sample_splits.extend(batch_splits)
 
             ground_truths = [
@@ -723,9 +720,13 @@ class RayPPOTrainer:
                     metric_dict[f"val-aux/split_{split}/count@{n_val}"] = int(mask.sum())
                     # [W5] Per-split PRM decomposition
                     if sample_outcome_rewards and len(sample_outcome_rewards) == len(sample_scores):
-                        metric_dict[f"val-core/split_{split}/outcome_reward/mean@{n_val}"] = float(np.mean(np.array(sample_outcome_rewards)[mask]))
+                        metric_dict[f"val-core/split_{split}/outcome_reward/mean@{n_val}"] = float(
+                            np.mean(np.array(sample_outcome_rewards)[mask])
+                        )
                     if sample_process_scores and len(sample_process_scores) == len(sample_scores):
-                        metric_dict[f"val-core/split_{split}/process_score/mean@{n_val}"] = float(np.mean(np.array(sample_process_scores)[mask]))
+                        metric_dict[f"val-core/split_{split}/process_score/mean@{n_val}"] = float(
+                            np.mean(np.array(sample_process_scores)[mask])
+                        )
 
         return metric_dict
 
@@ -895,6 +896,13 @@ class RayPPOTrainer:
         )
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
+
+        archive_root = self.config.trainer.get("checkpoint_archive_dir")
+        if archive_root:
+            from verl.utils.checkpoint.checkpoint_manager import archive_checkpoint
+
+            archived_path = archive_checkpoint(local_global_step_folder, archive_root)
+            print(f"Archived complete checkpoint to {archived_path}", flush=True)
 
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
@@ -1171,7 +1179,10 @@ class RayPPOTrainer:
                     bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
                     # Fallback: if rollout_log_probs already exists in batch, always bypass to avoid OOM
                     if not bypass_recomputing_logprobs and "rollout_log_probs" in batch.batch.keys():
-                        print("[WARNING] rollout_log_probs present in batch but bypass_mode=false, forcing bypass to avoid OOM.")
+                        print(
+                            "[WARNING] rollout_log_probs present in batch but bypass_mode=false, "
+                            "forcing bypass to avoid OOM."
+                        )
                         bypass_recomputing_logprobs = True
                         rollout_corr_config = rollout_corr_config or {}
                     if bypass_recomputing_logprobs:  # Use `rollout_log_probs`

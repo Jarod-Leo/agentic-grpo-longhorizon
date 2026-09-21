@@ -73,3 +73,70 @@ def test_holdout_and_nonbinary_scores_rejected(tmp_path):
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
     checks = build_summary(tmp_path)[0]["checks"]
     assert not checks["task_split_matches"] and not checks["scores_binary_finite"]
+
+
+def test_periodic_eval_and_external_checkpoints(tmp_path):
+    """Train and validation at the same step must not form one GRPO group."""
+    write_run(tmp_path, [0] * 8)
+    meta = json.loads((tmp_path / "run.json").read_text())
+    checkpoint_root = tmp_path / "archive"
+    meta.update(
+        mode="train",
+        train_batch_size=2,
+        total_steps=2,
+        start_step=0,
+        expected_trajectories=24,
+        evaluation_steps=[2],
+        eval_samples_per_task=4,
+        checkpoint_steps=[2],
+        checkpoint_root=str(checkpoint_root),
+    )
+    (tmp_path / "run.json").write_text(json.dumps(meta))
+    rows = []
+    for step, validate in [(1, False), (2, False), (2, True)]:
+        for task in [1, 4]:
+            for sample in range(4):
+                rows.append(
+                    dict(
+                        trajectory_id=f"{step}-{validate}-{task}-{sample}",
+                        step=step,
+                        validate=validate,
+                        task_id=task,
+                        split="train",
+                        score=int(validate),
+                        protocol="v2",
+                        schema_verified=True,
+                    )
+                )
+    for name, values in [
+        ("eval_trajectories", rows),
+        (
+            "tool_audit",
+            [dict(event="generation", trajectory_id=r["trajectory_id"]) for r in rows],
+        ),
+        ("metrics", [dict(step=i, data={"actor/grad_norm": 0.1}) for i in [1, 2]]),
+    ]:
+        (tmp_path / f"{name}.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in values)
+        )
+    for name in [
+        "data.pt",
+        "actor/model_world_size_1_rank_0.pt",
+        "actor/optim_world_size_1_rank_0.pt",
+        "actor/extra_state_world_size_1_rank_0.pt",
+        "actor/lora_adapter/adapter_config.json",
+        "actor/lora_adapter/adapter_model.safetensors",
+    ]:
+        p = checkpoint_root / "global_step_2" / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.touch()
+    result, _ = build_summary(tmp_path)
+    assert result["accepted"], result["checks"]
+    assert result["splits"]["train"]["success_rate"] == 0
+    assert result["evaluations"]["2"]["success_rate"] == 1
+    path = tmp_path / "eval_trajectories.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows[:-1]))
+    assert not build_summary(tmp_path)[0]["accepted"]
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (checkpoint_root / "global_step_2/actor/optim_world_size_1_rank_0.pt").unlink()
+    assert not build_summary(tmp_path)[0]["checks"]["checkpoint_2_complete"]

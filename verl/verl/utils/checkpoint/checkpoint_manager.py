@@ -26,6 +26,22 @@ from verl.trainer.config import CheckpointConfig
 from verl.utils.device import get_device_name, get_torch_device
 
 
+def archive_checkpoint(local_path: str, archive_root: str) -> str:
+    """Archive a completed checkpoint, then retain an SSD link for discovery/resume."""
+    local_path = os.path.abspath(local_path)
+    target = os.path.join(os.path.abspath(archive_root), os.path.basename(local_path))
+    if os.path.lexists(target):
+        raise FileExistsError(target)
+    os.makedirs(archive_root, exist_ok=True)
+    # A failed copy leaves the complete SSD checkpoint intact.
+    temporary = target + ".incomplete"
+    shutil.copytree(local_path, temporary)
+    os.rename(temporary, target)
+    shutil.rmtree(local_path)
+    os.symlink(target, local_path, target_is_directory=True)
+    return target
+
+
 class BaseCheckpointManager:
     """
     A checkpoint manager that saves and loads the following states in a SPMD way:

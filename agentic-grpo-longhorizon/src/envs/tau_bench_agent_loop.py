@@ -100,6 +100,7 @@ class TauBenchAgentLoop(AuditedToolAgentLoop):
             record = {
                 "protocol": info.get("protocol"),
                 "step": kwargs.get("trajectory", {}).get("step"),
+                "validate": kwargs.get("trajectory", {}).get("validate", False),
                 "trajectory_id": data.request_id,
                 "task_id": int(info["task_id"]),
                 "split": info["split"],

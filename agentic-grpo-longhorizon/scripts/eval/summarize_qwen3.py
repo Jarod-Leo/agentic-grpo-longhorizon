@@ -43,7 +43,15 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
         else meta.get("train_task_ids", [])
     )
     task_splits = dict.fromkeys(tasks, eval_split if mode == "eval" else "train")
-    task_rows = per_task_results(rows, task_splits)
+    training_rows = (
+        [row for row in rows if not row.get("validate", False)]
+        if mode == "train"
+        else rows
+    )
+    validation_rows = (
+        [row for row in rows if row.get("validate", False)] if mode == "train" else []
+    )
+    task_rows = per_task_results(training_rows, task_splits)
     exit_path = run / "exit_code.txt"
     checks = {
         "process_success": exit_path.exists() and exit_path.read_text().strip() == "0",
@@ -73,6 +81,7 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
         and all(row.get("success") or row.get("retry") for row in api),
     }
     learning = {}
+    evaluations = {}
     if mode == "eval":
         counts = Counter(row.get("task_id") for row in rows)
         checks.update(
@@ -93,7 +102,7 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
             range(meta.get("start_step", 0) + 1, meta.get("total_steps", 0) + 1)
         )
         grouped = defaultdict(list)
-        for row in rows:
+        for row in training_rows:
             grouped[row.get("step")].append(row)
         checks["training_steps"] = set(grouped) == steps
         checks["groups_per_step"] = all(
@@ -116,8 +125,24 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
             for value in row.get("data", row).values()
             if isinstance(value, (float, int))
         )
-        for step in steps:
-            checkpoint = run / "checkpoints" / f"global_step_{step}"
+        eval_grouped = defaultdict(list)
+        for row in validation_rows:
+            eval_grouped[row.get("step")].append(row)
+        checks["evaluation_steps"] = set(eval_grouped) == set(
+            meta.get("evaluation_steps", [])
+        )
+        for step, batch in eval_grouped.items():
+            counts = Counter(row.get("task_id") for row in batch)
+            checks[f"evaluation_{step}_samples"] = set(counts) == set(tasks) and all(
+                n == meta.get("eval_samples_per_task", 8) for n in counts.values()
+            )
+            eval_tasks = per_task_results(batch, task_splits)
+            evaluations[str(step)] = aggregate_split(eval_tasks, eval_split)
+        for step in meta.get("checkpoint_steps", sorted(steps)):
+            checkpoint = (
+                Path(meta.get("checkpoint_root", str(run / "checkpoints")))
+                / f"global_step_{step}"
+            )
             checks[f"checkpoint_{step}_complete"] = all(
                 (checkpoint / name).is_file()
                 for name in (
@@ -130,7 +155,7 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
                 )
             )
         successes = defaultdict(list)
-        for row in rows:
+        for row in training_rows:
             successes[(row.get("step"), row.get("task_id"))].append(row.get("score"))
         mixed = sum(
             any(v == 0 for v in values) and any(v == 1 for v in values)
@@ -171,6 +196,7 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
         "tools": tools,
         "api": summarize_api(api),
         "learning": learning,
+        "evaluations": evaluations,
         "lora_initialization": initializations,
         "termination_reasons": dict(Counter(row.get("termination") for row in rows)),
         "gpu_hours": (finish - start) / 3600
@@ -202,6 +228,10 @@ def write_outputs(run: Path, summary: dict, task_rows: list[dict]) -> None:
     for name, row in summary["splits"].items():
         lines.append(
             f"| {name} | {row['tasks']} | {row['n']} | {pct(row['success_rate'])} | {pct(row['pass_all_4'])} | {pct(row['pass_at_4'])} |"
+        )
+    for step, row in summary.get("evaluations", {}).items():
+        lines.append(
+            f"| train 独立评测 step {step} | {row['tasks']} | {row['n']} | {pct(row['success_rate'])} | {pct(row['pass_all_4'])} | {pct(row['pass_at_4'])} |"
         )
     lines += [
         "",

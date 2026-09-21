@@ -19,6 +19,10 @@ def main() -> None:
     parser.add_argument("--split", choices=["train", "test"], default="train")
     parser.add_argument("--samples", type=int, default=8)
     parser.add_argument("--steps", type=int, default=3)
+    parser.add_argument("--save-freq", type=int, default=1)
+    parser.add_argument("--eval-freq", type=int, default=-1)
+    parser.add_argument("--eval-samples", type=int, default=8)
+    parser.add_argument("--checkpoint-root", type=Path)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--adapter", type=Path)
     args = parser.parse_args()
@@ -49,6 +53,17 @@ def main() -> None:
     pd.DataFrame(build_rows(ids, args.split)).to_parquet(
         args.run / "eval.parquet", index=False
     )
+
+    def scheduled_steps(frequency: int) -> list[int]:
+        if args.mode != "train" or frequency <= 0:
+            return []
+        return [
+            step
+            for step in range(start + 1, args.steps + 1)
+            if step % frequency == 0 or step == args.steps
+        ]
+
+    evaluation_steps = scheduled_steps(args.eval_freq)
     metadata = {
         "protocol": PROTOCOL,
         "mode": args.mode,
@@ -61,7 +76,13 @@ def main() -> None:
         "start_step": start,
         "expected_trajectories": len(ids) * args.samples
         if args.mode == "eval"
-        else (args.steps - start) * 4 * args.samples,
+        else (args.steps - start) * 4 * args.samples
+        + len(evaluation_steps) * len(ids) * args.eval_samples,
+        "checkpoint_root": str(args.checkpoint_root or args.run / "checkpoints"),
+        "checkpoint_steps": scheduled_steps(args.save_freq),
+        "checkpoint_archive_root": os.environ.get("CHECKPOINT_ARCHIVE_ROOT"),
+        "evaluation_steps": evaluation_steps,
+        "eval_samples_per_task": args.eval_samples,
         "resume_from": str(args.resume) if args.resume else None,
         "adapter": str(args.adapter) if args.adapter else None,
         "base_model": os.environ["POLICY_MODEL"],
