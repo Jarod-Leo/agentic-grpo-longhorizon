@@ -1,6 +1,6 @@
 # E01：Vanilla GRPO 实施与验证计划
 
-状态：E00 v2、E01 三步训练/恢复/独立评测均已通过；动态微批32768单步验收通过。用户批准正式E01训练200步，每100步评测并保存完整checkpoint，HDD长期保留。
+状态：正式作业163430在第75步因MiMo usage=null被错误拒绝而失败，已完成74步且无checkpoint。正在验证修复；用户批准checkpoint每50步、评测每100步。
 
 ## 实验边界
 
@@ -165,3 +165,8 @@ Slurm：单PRO6000、gpu-pro6000-11（已验证模型可访问）、36小时上�
 验证包括：原有用例、同一步训练/评测隔离与缺失拒绝、外部checkpoint路径与完整性、归档保留数据/本地链接、复制失败时SSD副本保留。框架Ruff check和format检查通过。正式提交使用冻结快照，运行后不修改其代码。
 
 最终CPU预检 **163429**：33 tests passed，正式配置和7040轨迹元数据检查通过。正式作业 **163430** 已提交；冻结源码 `source-formal-v2`，SSD输出 `experiments/e01_vanilla_grpo/formal-seed42-200-v1/train`。
+
+
+## MiMo失败修复及恢复checkpoint频率
+
+详见 `e01_mimo_failure_analysis.md`。MiMo允许usage=null；有效回复仍使用原文本，费用标为未知。异常回复增加有限重试和安全结构化诊断。正式配置更新为200步、checkpoint每50步、评测每100步，预期训练6400+评测640=7040条轨迹不变。HDD保留50/100/150/200完整checkpoint；新正式训练必须从基础模型开始，不能声称恢复原第74步。

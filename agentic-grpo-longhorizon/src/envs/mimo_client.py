@@ -17,6 +17,15 @@ class UserSimulatorAPIError(RuntimeError):
     """Infrastructure errors must not become task rewards."""
 
 
+class MimoResponseError(UserSimulatorAPIError):
+    """A safe response-validation reason, without provider text or credentials."""
+
+    def __init__(self, reason: str, retryable: bool = True):
+        super().__init__(reason)
+        self.reason = reason
+        self.retryable = retryable
+
+
 class RateLimiter:
     def __init__(self, rpm=100, tpm=10_000_000, window=60.0):
         self.rpm, self.tpm, self.window = rpm, tpm, window
@@ -154,6 +163,9 @@ class MimoClient:
                 status = None
                 retry = False
                 failure = None
+                error_type = error_reason = finish_reason = None
+                content_chars = None
+                response_received = False
                 try:
                     response = self.sdk.chat.completions.create(
                         model=self.model,
@@ -164,28 +176,39 @@ class MimoClient:
                         stream=False,
                         extra_body={"thinking": {"type": "disabled"}},
                     )
-                    usage = (
-                        response.usage.model_dump()
-                        if response.usage is not None
-                        else None
-                    )
-                    if not usage or not isinstance(usage.get("total_tokens"), int):
-                        raise UserSimulatorAPIError(
-                            "MiMo response is missing token usage"
-                        )
-                    choice = response.choices[0]
-                    content = choice.message.content
-                    if (
-                        choice.finish_reason != "stop"
-                        or not content
-                        or not content.strip()
-                    ):
-                        raise UserSimulatorAPIError(
-                            "MiMo response is empty, truncated, or not plain text"
-                        )
+                    response_received = True
                     status = 200
+                    # MiMo documents usage as optional; it is accounting, not dialogue validity.
+                    usage_object = getattr(response, "usage", None)
+                    usage = (
+                        usage_object.model_dump() if usage_object is not None else None
+                    )
+                    if usage is not None and any(
+                        type(usage.get(key)) is not int or usage[key] < 0
+                        for key in (
+                            "prompt_tokens",
+                            "completion_tokens",
+                            "total_tokens",
+                        )
+                    ):
+                        usage = None
+                    choices = getattr(response, "choices", None)
+                    if not choices:
+                        raise MimoResponseError("missing_choices")
+                    choice = choices[0]
+                    finish_reason = getattr(choice, "finish_reason", None)
+                    content = getattr(getattr(choice, "message", None), "content", None)
+                    content_chars = len(content) if isinstance(content, str) else None
+                    if finish_reason != "stop":
+                        raise MimoResponseError(
+                            "unexpected_finish_reason",
+                            retryable=finish_reason
+                            in (None, "length", "repetition_truncation"),
+                        )
+                    if not isinstance(content, str) or not content.strip():
+                        raise MimoResponseError("empty_or_nontext_content")
                 except Exception as exc:  # noqa: BLE001 - sanitize SDK errors and abort the entire rollout batch
-                    status = getattr(exc, "status_code", None)
+                    status = getattr(exc, "status_code", status)
                     retryable = status == 429 or (
                         isinstance(status, int) and status >= 500
                     )
@@ -193,9 +216,15 @@ class MimoClient:
                         "APIConnectionError",
                         "APITimeoutError",
                     }
+                    if isinstance(exc, MimoResponseError):
+                        retryable = exc.retryable
+                    error_type = type(exc).__name__
+                    error_reason = (
+                        exc.reason if isinstance(exc, MimoResponseError) else error_type
+                    )
                     retry = retryable and attempt < 3
                     # Never include raw SDK exception text, request headers, or credentials.
-                    failure = f"MiMo request failed: {type(exc).__name__}, status={status}, attempt={attempt + 1}"
+                    failure = f"MiMo request failed: {error_type}, reason={error_reason}, status={status}, attempt={attempt + 1}"
                     if retry:
                         self.limiter.backoff(self._retry_after(exc, attempt))
                     else:
@@ -217,6 +246,12 @@ class MimoClient:
                             "retry": retry,
                             "success": failure is None,
                             "usage": usage,
+                            "usage_missing": usage is None,
+                            "response_received": response_received,
+                            "finish_reason": finish_reason,
+                            "content_chars": content_chars,
+                            "error_type": error_type,
+                            "error_reason": error_reason,
                             "reserved_tokens": reservation,
                         }
                     )
@@ -228,6 +263,8 @@ class MimoClient:
 
 def estimated_cost_usd(usage):
     """Published MiMo-v2.5 prices at 2026-09-19; estimate, not a billing receipt."""
+    if usage is None:
+        return None
     cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
     prompt = usage.get("prompt_tokens", 0)
     return (

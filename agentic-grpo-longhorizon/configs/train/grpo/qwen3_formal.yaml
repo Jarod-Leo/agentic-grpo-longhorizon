@@ -12,6 +12,6 @@ defaults:
 trainer:
   total_epochs: 20
   total_training_steps: 200
-  save_freq: 100
+  save_freq: 50
   test_freq: 100
   checkpoint_archive_dir: ${oc.env:CHECKPOINT_ARCHIVE_ROOT}

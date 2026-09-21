@@ -213,6 +213,8 @@ def summarize_api(api_rows: list[dict[str, Any]]) -> dict[str, Any]:
         "failed_attempts": sum(row.get("success") is False for row in api_rows),
         "retry_attempts": sum((row.get("attempt") or 1) > 1 for row in api_rows),
         "usage": usage,
+        "usage_complete": all(row.get("usage") is not None for row in api_rows),
+        "requests_missing_usage": sum(row.get("usage") is None for row in api_rows),
         "latency_s": {
             "p50": percentile(latencies, 0.5),
             "p90": percentile(latencies, 0.9),

@@ -7,7 +7,7 @@ export OMP_NUM_THREADS=2 TOKENIZERS_PARALLELISM=false
 export RUN_DIR=$RUN_ROOT/config-check EXP_NAME=config_check RAY_TMPDIR=/tmp/qwen3-config-check
 mkdir -p "$RUN_DIR"
 export CHECKPOINT_ROOT=$RUN_ROOT/checkpoints CHECKPOINT_ARCHIVE_ROOT=$RUN_ROOT/archive
-python -m pytest -q src/envs/tests/test_tau_bench_input.py src/evaluation/tests/test_pass_metrics.py \
+python -m pytest -q src/envs/tests/test_mimo_client.py src/envs/tests/test_tau_bench_input.py src/evaluation/tests/test_pass_metrics.py \
     src/evaluation/tests/test_qwen3_summary.py src/envs/tests/test_agent_loop_lifecycle.py src/evaluation/tests/test_e00_summary.py \
     ../verl/tests/trainer/ppo/test_grpo_signal_on_cpu.py
 python scripts/train/grpo/prepare_qwen3_run.py "$RUN_DIR" --mode train
@@ -28,7 +28,7 @@ eval_config=config('configs/eval/qwen3','eval_qwen3','eval_config.yaml')
 formal=config('configs/train/grpo','qwen3_formal','formal_config.yaml')
 assert formal['trainer']['total_training_steps']==200
 assert formal['trainer']['total_epochs']==20
-assert formal['trainer']['save_freq']==formal['trainer']['test_freq']==100
+assert formal['trainer']['save_freq']==50 and formal['trainer']['test_freq']==100
 assert formal['actor_rollout_ref']['actor']['ppo_max_token_len_per_gpu']==32768
 assert formal['actor_rollout_ref']['rollout']['val_kwargs']['n']==8
 fast=config('configs/train/grpo','qwen3_unpad','fast_config.yaml')
@@ -65,11 +65,12 @@ print('CONFIG_AND_TOKENIZER_OK prompt_tokens=',len(tokens))
 PY
 
 mkdir -p "$RUN_ROOT/formal-input-check"
-python scripts/train/grpo/prepare_qwen3_run.py "$RUN_ROOT/formal-input-check" --mode train --steps 200 --save-freq 100 --eval-freq 100 --eval-samples 8 --checkpoint-root "$CHECKPOINT_ROOT"
+python scripts/train/grpo/prepare_qwen3_run.py "$RUN_ROOT/formal-input-check" --mode train --steps 200 --save-freq 50 --eval-freq 100 --eval-samples 8 --checkpoint-root "$CHECKPOINT_ROOT"
 python - "$RUN_ROOT/formal-input-check/run.json" <<'PY_CHECK'
 import json,sys
 meta=json.load(open(sys.argv[1]))
-assert meta['checkpoint_steps']==meta['evaluation_steps']==[100,200]
+assert meta['checkpoint_steps']==[50,100,150,200]
+assert meta['evaluation_steps']==[100,200]
 assert meta['expected_trajectories']==7040
 print('FORMAL_INPUTS_OK steps=200 training=6400 evaluation=640')
 PY_CHECK

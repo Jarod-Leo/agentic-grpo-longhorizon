@@ -93,6 +93,31 @@
     "token_budget": 32768,
     "seed": 42,
     "time_limit": "36:00:00",
-    "state": "SUBMITTED; not yet completed"
+    "state": "FAILED at step75 after 74 updates: optional MiMo usage=null incorrectly rejected; no checkpoints"
+  },
+  "mimo_fix_smoke": {
+    "job_id": "164680",
+    "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/source-formal-v3",
+    "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/mimo-fix-smoke-v1",
+    "checkpoint_archive_root": "/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/checkpoints/e01_vanilla_grpo/mimo-fix-smoke-v1",
+    "entry": "scripts/train/grpo/run_qwen3.sh",
+    "dependency": null,
+    "state": "SUBMITTED",
+    "cpu_check_job": "164674"
+  },
+  "formal_retry": {
+    "job_id": "164681",
+    "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/source-formal-v3",
+    "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/formal-seed42-200-v2",
+    "checkpoint_archive_root": "/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/checkpoints/e01_vanilla_grpo/formal-seed42-200-v2",
+    "entry": "scripts/train/grpo/run_qwen3_formal.sh",
+    "dependency": "164680",
+    "state": "SUBMITTED",
+    "steps": 200,
+    "save_freq": 50,
+    "eval_freq": 100,
+    "token_budget": 32768,
+    "seed": 42,
+    "resume_from": null
   }
 }
