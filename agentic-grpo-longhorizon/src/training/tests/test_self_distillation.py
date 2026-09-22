@@ -7,8 +7,15 @@ import pytest
 import torch
 from torch import nn
 from verl.protocol import DataProto
+from verl.trainer.ppo.core_algos import compute_policy_loss_vanilla
+from verl.trainer.ppo.distillation_loss import compute_sampled_token_opd_loss
 
 from src.training.self_distillation import build_self_teacher_batch, score_self_teacher
+
+
+class PolicyConfig(SimpleNamespace):
+    def get(self, name, default=None):
+        return getattr(self, name, default)
 
 
 class CharTokenizer:
@@ -297,3 +304,54 @@ def test_invalid_positive_or_nan_self_teacher_scores_fail(bad_score):
     with pytest.raises(ValueError, match="invalid log-probabilities"):
         score_self_teacher(make_batch(), config(), CharTokenizer(), actor)
     assert actor.compute_calls == 1
+
+
+def test_grpo_plus_self_teacher_gradient_equals_weighted_branch_sum():
+    batch = make_batch()
+    teacher_scores, _ = score_self_teacher(
+        batch, config(), CharTokenizer(), TinyActorWorkerGroup()
+    )
+    old = batch.batch["old_log_probs"]
+    mask = batch.batch["response_mask"]
+    current = old.clone().requires_grad_()
+    advantages = torch.tensor([[1.0, -0.5, 0.0], [-1.0, 0.0, 0.0]])
+    policy_config = PolicyConfig(
+        clip_ratio=0.2, clip_ratio_low=0.2, clip_ratio_high=0.2, clip_ratio_c=3.0
+    )
+
+    rl_loss, _ = compute_policy_loss_vanilla(
+        old, current, advantages, mask, config=policy_config
+    )
+    self_loss, _ = compute_sampled_token_opd_loss(current, old, teacher_scores, mask)
+    rl_gradient = torch.autograd.grad(rl_loss, current, retain_graph=True)[0]
+    self_gradient = torch.autograd.grad(self_loss, current, retain_graph=True)[0]
+    joint_gradient = torch.autograd.grad(rl_loss + 0.3 * self_loss, current)[0]
+
+    torch.testing.assert_close(joint_gradient, rl_gradient + 0.3 * self_gradient)
+    assert torch.count_nonzero(rl_gradient[mask.bool()]) > 0
+    assert torch.count_nonzero(self_gradient[mask.bool()]) > 0
+
+
+def test_zero_grpo_signal_retains_weighted_self_teacher_gradient():
+    batch = make_batch()
+    teacher_scores, _ = score_self_teacher(
+        batch, config(), CharTokenizer(), TinyActorWorkerGroup()
+    )
+    old = batch.batch["old_log_probs"]
+    mask = batch.batch["response_mask"]
+    current = old.clone().requires_grad_()
+    policy_config = PolicyConfig(
+        clip_ratio=0.2, clip_ratio_low=0.2, clip_ratio_high=0.2, clip_ratio_c=3.0
+    )
+
+    rl_loss, _ = compute_policy_loss_vanilla(
+        old, current, torch.zeros_like(old), mask, config=policy_config
+    )
+    self_loss, _ = compute_sampled_token_opd_loss(current, old, teacher_scores, mask)
+    rl_gradient = torch.autograd.grad(rl_loss, current, retain_graph=True)[0]
+    self_gradient = torch.autograd.grad(self_loss, current, retain_graph=True)[0]
+    joint_gradient = torch.autograd.grad(rl_loss + 0.3 * self_loss, current)[0]
+
+    assert torch.count_nonzero(rl_gradient) == 0
+    assert torch.count_nonzero(self_gradient[mask.bool()]) > 0
+    torch.testing.assert_close(joint_gradient, 0.3 * self_gradient)
