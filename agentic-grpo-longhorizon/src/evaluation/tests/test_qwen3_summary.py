@@ -259,3 +259,45 @@ def test_pure_opd_signal_is_independent_of_outcome_groups(tmp_path):
     data.pop("distillation/policy_version")
     path.write_text(json.dumps({"step": 1, "data": data}) + "\n")
     assert not build_summary(tmp_path)[0]["accepted"]
+
+
+def test_self_distillation_requires_consistent_feedback_coverage(tmp_path):
+    write_joint_run(tmp_path)
+    path = tmp_path / "run.json"
+    meta = json.loads(path.read_text())
+    meta["distillation"] = {
+        "actor": {"enabled": True, "coef": 1.0, "rl_coef": 0.0},
+        "teacher": {
+            "teacher_mode": "self_feedback",
+            "feedback_mode": "F2",
+            "feedback_version": "opsd-f2-v1",
+        },
+    }
+    path.write_text(json.dumps(meta))
+    data = {
+        "actor/grad_norm": 0.1,
+        "actor/opd_loss": -0.2,
+        "actor/rl_loss": 0.0,
+        "actor/opd_coef": 1.0,
+        "actor/rl_coef": 0.0,
+        "actor/opd_signal_token_fraction": 0.5,
+        "distillation/scored_tokens": 20,
+        "distillation/scored_trajectories": 8,
+        "distillation/policy_version": 0,
+        "distillation/feedback_trajectories": 6,
+        "distillation/feedback_tokens": 42,
+        "distillation/feedback_coverage": 0.75,
+    }
+    path = tmp_path / "metrics.jsonl"
+    path.write_text(json.dumps({"step": 1, "data": data}) + "\n")
+    result, _ = build_summary(tmp_path)
+    assert result["accepted"], result["checks"]
+    assert result["learning"]["teacher_mode"] == "self_feedback"
+    assert result["learning"]["feedback_version"] == "opsd-f2-v1"
+    assert result["learning"]["feedback_by_step"][0]["feedback_coverage"] == 0.75
+    data["distillation/feedback_coverage"] = 1.0
+    path.write_text(json.dumps({"step": 1, "data": data}) + "\n")
+    assert not build_summary(tmp_path)[0]["accepted"]
+    data.pop("distillation/feedback_tokens")
+    path.write_text(json.dumps({"step": 1, "data": data}) + "\n")
+    assert not build_summary(tmp_path)[0]["accepted"]

@@ -9,6 +9,11 @@ from pathlib import Path
 
 import yaml
 from src.envs.audited_tool_agent_loop import AuditedToolAgentLoop
+from src.envs.opsd_feedback import (
+    OPSD_FEEDBACK_VERSION,
+    build_opsd_feedback,
+    empty_opsd_feedback,
+)
 from tau_bench.envs.airline.wiki import WIKI
 from verl.experimental.agent_loop.tool_agent_loop import AgentState
 
@@ -147,6 +152,31 @@ class TauBenchAgentLoop(AuditedToolAgentLoop):
                 outcome_reward if is_validation else float(output.reward_score)
             )
             output.reward_score = training_reward
+
+            opsd_feedback = None
+            distillation = self.config.get("distillation", {})
+            if (
+                distillation.get("teacher_mode") == "self_feedback"
+                and not is_validation
+            ):
+                feedback_mode = distillation.get("feedback_mode", "F0")
+                version = distillation.get("feedback_version", OPSD_FEEDBACK_VERSION)
+                if feedback_mode == "F2":
+                    state = data.interaction.opsd_feedback_state(data.request_id)
+                    opsd_feedback = build_opsd_feedback(
+                        state,
+                        outcome_reward=outcome_reward,
+                        termination=self.eval_termination,
+                        version=version,
+                    )
+                elif feedback_mode == "F0":
+                    opsd_feedback = empty_opsd_feedback(version)
+                else:
+                    raise ValueError(
+                        f"Unsupported self-feedback mode: {feedback_mode!r}"
+                    )
+                output.extra_fields["opsd_feedback"] = opsd_feedback
+
             info = kwargs["extra_info"]
             record = {
                 "protocol": info.get("protocol"),
@@ -173,6 +203,8 @@ class TauBenchAgentLoop(AuditedToolAgentLoop):
                 ),
                 "schema_verified": True,
             }
+            if opsd_feedback is not None:
+                record["opsd_feedback"] = opsd_feedback
             append_record(record)
             return output
         finally:

@@ -11,6 +11,7 @@ W4 新增:
 - reward_mode 配置化切换: binary(原始) / partial_credit(未执行) / prm_lite(Exp 3)
 - 通过 interaction config 的 reward_mode 字段控制,不改代码即可切换实验
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -41,6 +42,7 @@ def record_assistant_content(content: str) -> None:
     TauBenchTool.execute 读取此值存入 action_history，用于 cheap reasoning 检测。"""
     CURRENT_ASSISTANT_CONTENT.set(content)
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -67,33 +69,61 @@ def _extract_latest_assistant_content(messages: list[dict]) -> str:
 # ============================================================================
 
 # PRM-Lite v3: tool categories based on tau-bench airline actual tools
-_READ_TOOLS = frozenset({
-    "list_all_airports", "search_direct_flight", "search_onestop_flight",
-    "get_user_details", "get_reservation_details", "calculate",
-})
-_WRITE_TOOLS = frozenset({
-    "book_reservation", "cancel_reservation", "update_reservation_baggages",
-    "update_reservation_passengers", "update_reservation_flights", "send_certificate",
-})
+_READ_TOOLS = frozenset(
+    {
+        "list_all_airports",
+        "search_direct_flight",
+        "search_onestop_flight",
+        "get_user_details",
+        "get_reservation_details",
+        "calculate",
+    }
+)
+_WRITE_TOOLS = frozenset(
+    {
+        "book_reservation",
+        "cancel_reservation",
+        "update_reservation_baggages",
+        "update_reservation_passengers",
+        "update_reservation_flights",
+        "send_certificate",
+    }
+)
 _ESCALATION_TOOLS = frozenset({"transfer_to_human_agents"})
 _THINK_TOOLS = frozenset({"think", "implicit_think"})
 
 # Schema-based parameter validation patterns (from tau_bench_airline_tools.yaml)
 _PARAM_PATTERNS = {
-    "reservation_id": re.compile(r'^[A-Z0-9]{6}$'),
-    "user_id": re.compile(r'^[a-z]+_[a-z]+_[0-9]+$'),
-    "payment_id": re.compile(r'^(credit_card|gift_card|certificate)_[0-9]+$'),
-    "flight_number": re.compile(r'^[A-Z]{3}[0-9]{3}$'),
-    "origin": re.compile(r'^[A-Z]{3}$'),
-    "destination": re.compile(r'^[A-Z]{3}$'),
-    "date": re.compile(r'^\d{4}-\d{2}-\d{2}$'),
+    "reservation_id": re.compile(r"^[A-Z0-9]{6}$"),
+    "user_id": re.compile(r"^[a-z]+_[a-z]+_[0-9]+$"),
+    "payment_id": re.compile(r"^(credit_card|gift_card|certificate)_[0-9]+$"),
+    "flight_number": re.compile(r"^[A-Z]{3}[0-9]{3}$"),
+    "origin": re.compile(r"^[A-Z]{3}$"),
+    "destination": re.compile(r"^[A-Z]{3}$"),
+    "date": re.compile(r"^\d{4}-\d{2}-\d{2}$"),
 }
 
-_PLACEHOLDER_KEYWORDS = frozenset({
-    "previous", "unknown", "placeholder", "none", "null", "n/a",
-    "any", "some", "first", "last", "default", "example", "sample",
-    "test", "dummy", "temp", "temporary",
-})
+_PLACEHOLDER_KEYWORDS = frozenset(
+    {
+        "previous",
+        "unknown",
+        "placeholder",
+        "none",
+        "null",
+        "n/a",
+        "any",
+        "some",
+        "first",
+        "last",
+        "default",
+        "example",
+        "sample",
+        "test",
+        "dummy",
+        "temp",
+        "temporary",
+    }
+)
 
 
 def _param_str(params: dict) -> str:
@@ -121,7 +151,9 @@ def _has_placeholder(params: dict) -> bool:
     return False
 
 
-def _is_redundant(action_history: list[dict], current_tool: str, current_params: dict, window: int = 3) -> bool:
+def _is_redundant(
+    action_history: list[dict], current_tool: str, current_params: dict, window: int = 3
+) -> bool:
     current_sig = (current_tool, _param_str(current_params))
     for prev in action_history[-window:]:
         prev_tool = prev.get("tool", "")
@@ -185,10 +217,12 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
 
         # P1: Placeholder penalty (schema-based)
         if tool not in _THINK_TOOLS and _has_placeholder(params):
-            score += (-0.05 if tool in _WRITE_TOOLS else -0.03)
+            score += -0.05 if tool in _WRITE_TOOLS else -0.03
 
         # P2: Redundancy (same tool+params in last 3 steps)
-        if tool not in _THINK_TOOLS and _is_redundant(action_history[:i], tool, params, window=3):
+        if tool not in _THINK_TOOLS and _is_redundant(
+            action_history[:i], tool, params, window=3
+        ):
             score -= 0.03
 
         # P3: Error repetition vs recovery
@@ -205,10 +239,9 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
         # P4: Escalation penalty (layered: did we even try to gather info?)
         if tool in _ESCALATION_TOOLS:
             has_done_read = any(
-                prev.get("tool") in _READ_TOOLS
-                for prev in action_history[:i]
+                prev.get("tool") in _READ_TOOLS for prev in action_history[:i]
             )
-            score += (-0.10 if not has_done_read else -0.05)
+            score += -0.10 if not has_done_read else -0.05
 
         # --- Positive Incentives ---
 
@@ -218,14 +251,17 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
             for prev in action_history[:i]:
                 for ent_list in prev.get("extracted_entities", {}).values():
                     seen_entities.update(ent_list)
-            used = any(isinstance(v, str) and v in seen_entities for v in params.values())
+            used = any(
+                isinstance(v, str) and v in seen_entities for v in params.values()
+            )
             if used:
-                score += (0.08 if tool in _WRITE_TOOLS else 0.04)
+                score += 0.08 if tool in _WRITE_TOOLS else 0.04
 
         # B2: First read exploration (diverse info gathering)
         if tool in _READ_TOOLS:
             seen_reads = set(
-                prev["tool"] for prev in action_history[:i]
+                prev["tool"]
+                for prev in action_history[:i]
                 if prev.get("tool") in _READ_TOOLS
             )
             if tool not in seen_reads:
@@ -247,7 +283,7 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
                 next_tool = next_action.get("tool", "")
                 next_params = next_action.get("parameters", {})
                 if _has_placeholder(next_params) or _is_redundant(
-                    action_history[:i + 1], next_tool, next_params, window=3
+                    action_history[: i + 1], next_tool, next_params, window=3
                 ):
                     pass
                 else:
@@ -313,9 +349,7 @@ class TauBenchInteraction(BaseInteraction):
         super().__init__(config)
         self.env_name: str = config.get("env_name", "airline")
         self.user_strategy: str = config.get("user_strategy", "llm")
-        self.user_model: str = config.get(
-            "user_model", "Qwen/Qwen2.5-72B-Instruct-AWQ"
-        )
+        self.user_model: str = config.get("user_model", "Qwen/Qwen2.5-72B-Instruct-AWQ")
         self.user_provider: str = config.get("user_provider", "openai")
         self.user_base_url: str = config.get(
             "user_base_url", "http://localhost:8001/v1"
@@ -338,7 +372,9 @@ class TauBenchInteraction(BaseInteraction):
         if self.user_backend not in {"litellm", "mimo"}:
             raise ValueError(f"Unknown user_backend: {self.user_backend}")
         self.mimo_client = MimoClient(config) if self.user_backend == "mimo" else None
-        self.user_io_pool = ThreadPoolExecutor(max_workers=32) if self.mimo_client else None
+        self.user_io_pool = (
+            ThreadPoolExecutor(max_workers=32) if self.mimo_client else None
+        )
         self.completed_trajectories = set()
         self.expected_trajectories = int(config.get("expected_trajectories", 32))
 
@@ -379,7 +415,10 @@ class TauBenchInteraction(BaseInteraction):
         from tau_bench.envs import get_env
 
         task_id_int = int(task_id)
-        self._trajectory_event({"event": "start", "trajectory_id": instance_id, "task_id": task_id_int})
+        self._trajectory_event(
+            {"event": "start", "trajectory_id": instance_id, "task_id": task_id_int}
+        )
+
         def create_env():
             user_simulator = None
             if self.mimo_client is not None:
@@ -410,7 +449,11 @@ class TauBenchInteraction(BaseInteraction):
         CURRENT_TAU_STATE.set(state)
 
         # 备份引用: finalize 时清理用,以及 generate_response 里 defensive re-set
-        self._instance_dict[instance_id] = {"env": env, "state": state, "initial_user": initial_user}
+        self._instance_dict[instance_id] = {
+            "env": env,
+            "state": state,
+            "initial_user": initial_user,
+        }
 
         logger.debug(
             f"[start_interaction] instance={instance_id[:8]} task_id={task_id_int} "
@@ -459,23 +502,27 @@ class TauBenchInteraction(BaseInteraction):
         # [W5 PRM-Lite v3] 记录 implicit think: assistant 纯文本回复 > 100 chars
         if assistant_content and len(assistant_content) > 100:
             # 防御：避免同一 assistant message 被重复记录
-            last_action = state["action_history"][-1] if state["action_history"] else None
+            last_action = (
+                state["action_history"][-1] if state["action_history"] else None
+            )
             is_duplicate = (
                 last_action
                 and last_action.get("tool") == "implicit_think"
                 and last_action.get("content", "") == assistant_content[:300]
             )
             if not is_duplicate:
-                state["action_history"].append({
-                    "tool": "implicit_think",
-                    "parameters": {},
-                    "param_str": "",
-                    "inc_reward": 0,
-                    "done": False,
-                    "is_error": False,
-                    "extracted_entities": {},
-                    "content": assistant_content[:300],
-                })
+                state["action_history"].append(
+                    {
+                        "tool": "implicit_think",
+                        "parameters": {},
+                        "param_str": "",
+                        "inc_reward": 0,
+                        "done": False,
+                        "is_error": False,
+                        "extracted_entities": {},
+                        "content": assistant_content[:300],
+                    }
+                )
 
         # 污染检测: 锁定 reward=0 + terminate(§3.3)
         if _has_forbidden_token(assistant_content):
@@ -585,16 +632,26 @@ class TauBenchInteraction(BaseInteraction):
         else:
             score = outcome + 0.3 * process
 
-        if self.mimo_client is not None and instance_id not in self.completed_trajectories:
+        if (
+            self.mimo_client is not None
+            and instance_id not in self.completed_trajectories
+        ):
             self.completed_trajectories.add(instance_id)
-            self._trajectory_event({
-                "event": "complete", "trajectory_id": instance_id, "task_id": state["task_id"],
-                "score": score, "user_turns": state["num_user_turns"],
-                "tool_calls": state["num_tool_calls"], "contaminated": state.get("contaminated", False),
-            })
+            self._trajectory_event(
+                {
+                    "event": "complete",
+                    "trajectory_id": instance_id,
+                    "task_id": state["task_id"],
+                    "score": score,
+                    "user_turns": state["num_user_turns"],
+                    "tool_calls": state["num_tool_calls"],
+                    "contaminated": state.get("contaminated", False),
+                }
+            )
             print(
                 f"MIMO rollout progress {len(self.completed_trajectories)}/{self.expected_trajectories} "
-                f"task_id={state['task_id']}", flush=True,
+                f"task_id={state['task_id']}",
+                flush=True,
             )
 
         return {"score": score, "outcome_score": outcome, "process_score": process}
@@ -602,6 +659,13 @@ class TauBenchInteraction(BaseInteraction):
     def initial_user_message(self, instance_id: str) -> str:
         """Return the reset observation without another simulator request."""
         return self._instance_dict[instance_id]["initial_user"]
+
+    def opsd_feedback_state(self, instance_id: str) -> dict[str, Any]:
+        """Expose live audited state before trajectory finalization."""
+        entry = self._instance_dict.get(instance_id)
+        if entry is None:
+            raise RuntimeError(f"Missing live tau-bench state for {instance_id}")
+        return entry["state"]
 
     async def finalize_interaction(self, instance_id: str, **kwargs) -> None:
         """Trajectory 结束时清理 _instance_dict 避免内存泄漏"""

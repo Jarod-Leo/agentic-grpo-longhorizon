@@ -1,4 +1,4 @@
-# E06: pure OPD; task rewards are diagnostics only.
+# E11: pure feedback-conditioned on-policy self-distillation.
 hydra:
   searchpath:
     - pkg://verl/trainer/config
@@ -7,6 +7,6 @@ defaults:
   - ppo_trainer
   - qwen3_common
   - qwen3_performance
-  - qwen3_external_teacher
   - qwen3_distillation_common
+  - qwen3_self_teacher
   - _self_

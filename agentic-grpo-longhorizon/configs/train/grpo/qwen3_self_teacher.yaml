@@ -1,0 +1,8 @@
+# Logical frozen snapshot: score the full batch with the current actor before update.
+distillation:
+  scorer: src.training.self_distillation.score_self_teacher
+  teacher_mode: self_feedback
+  feedback_mode: F2
+  feedback_version: opsd-f2-v1
+  feedback_max_tokens: 512
+  max_teacher_length: 24576

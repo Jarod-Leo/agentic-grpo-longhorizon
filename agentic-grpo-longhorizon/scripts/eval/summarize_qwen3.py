@@ -280,6 +280,42 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
                 and row["data"]["actor/opd_signal_token_fraction"] > 0
                 for row in actor_metrics
             )
+            teacher = meta.get("distillation", {}).get("teacher") or {}
+            learning["teacher_mode"] = teacher.get("teacher_mode", "external")
+            if teacher.get("teacher_mode") == "self_feedback":
+                feedback_fields = {
+                    "distillation/feedback_trajectories",
+                    "distillation/feedback_tokens",
+                    "distillation/feedback_coverage",
+                }
+                checks["self_feedback_metrics_complete"] = bool(actor_metrics) and all(
+                    feedback_fields.issubset(row.get("data", {}))
+                    and all(finite_number(row["data"][key]) for key in feedback_fields)
+                    and 0
+                    <= row["data"]["distillation/feedback_trajectories"]
+                    <= row["data"].get("distillation/scored_trajectories", 0)
+                    and 0 <= row["data"]["distillation/feedback_tokens"]
+                    and math.isclose(
+                        row["data"]["distillation/feedback_coverage"],
+                        row["data"]["distillation/feedback_trajectories"]
+                        / max(
+                            row["data"].get("distillation/scored_trajectories", 0), 1
+                        ),
+                    )
+                    for row in actor_metrics
+                )
+                learning["feedback_version"] = teacher.get("feedback_version")
+                learning["feedback_mode"] = teacher.get("feedback_mode")
+                learning["feedback_by_step"] = [
+                    {
+                        "step": row["step"],
+                        **{
+                            key.split("/")[1]: row.get("data", {}).get(key)
+                            for key in sorted(feedback_fields)
+                        },
+                    }
+                    for row in actor_metrics
+                ]
             learning["reward_signal_observed"] = signal_groups > 0
             learning["distillation_signal_observed"] = teacher_signal
             learning["signal_observed"] = teacher_signal or (

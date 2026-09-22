@@ -1,0 +1,9 @@
+# Frozen external teacher shared by OPD methods.
+distillation:
+  scorer: src.training.distillation.score_external_teacher
+  teacher_mode: external
+  teacher_model_id: Qwen/Qwen3-32B
+  teacher_model_path: ${oc.env:TEACHER_MODEL,/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/models/Qwen/Qwen3-32B}
+  teacher_revision: 9216db5781bf21249d130ec9da846c4624c16137
+  endpoint: ${oc.env:TEACHER_ENDPOINT,http://127.0.0.1:18932}
+  timeout_s: 600
