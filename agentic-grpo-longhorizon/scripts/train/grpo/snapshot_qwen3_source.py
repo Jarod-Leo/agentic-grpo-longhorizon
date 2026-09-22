@@ -25,6 +25,7 @@ def main() -> None:
         "agentic-grpo-longhorizon/experiments/e00_qwen3_baseline/split.json",
         "verl/tests/trainer/ppo/test_grpo_signal_on_cpu.py",
         "verl/tests/trainer/ppo/test_grpo_lata_on_cpu.py",
+        "verl/tests/trainer/ppo/test_distillation_loss_on_cpu.py",
     ]
     manifest = {}
     for source in sources:

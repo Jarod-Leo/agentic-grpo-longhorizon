@@ -225,3 +225,37 @@ def test_joint_missing_or_invalid_reward_fields_rejected(tmp_path, field, value)
         rows[0][field] = value
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
     assert not build_summary(tmp_path)[0]["accepted"]
+
+
+def test_pure_opd_signal_is_independent_of_outcome_groups(tmp_path):
+    write_joint_run(tmp_path)
+    meta_path = tmp_path / "run.json"
+    meta = json.loads(meta_path.read_text())
+    meta["distillation"] = {"actor": {"enabled": True, "coef": 1.0, "rl_coef": 0.0}}
+    meta_path.write_text(json.dumps(meta))
+    data = {
+        "actor/grad_norm": 0.1,
+        "actor/opd_loss": -0.2,
+        "actor/rl_loss": 0.0,
+        "actor/opd_coef": 1.0,
+        "actor/rl_coef": 0.0,
+        "actor/opd_signal_token_fraction": 0.5,
+        "distillation/scored_tokens": 20,
+        "distillation/scored_trajectories": 8,
+        "distillation/policy_version": 0,
+    }
+    path = tmp_path / "metrics.jsonl"
+    path.write_text(json.dumps({"step": 1, "data": data}) + "\n")
+    result, _ = build_summary(tmp_path)
+    assert result["accepted"], result["checks"]
+    assert result["learning"]["distillation_signal_observed"]
+    assert result["learning"]["mixed_outcome_groups"] == 0
+    data["actor/opd_signal_token_fraction"] = 0.0
+    path.write_text(json.dumps({"step": 1, "data": data}) + "\n")
+    result, _ = build_summary(tmp_path)
+    assert not result["learning"][
+        "signal_observed"
+    ]  # PRM variation does not train pure OPD.
+    data.pop("distillation/policy_version")
+    path.write_text(json.dumps({"step": 1, "data": data}) + "\n")
+    assert not build_summary(tmp_path)[0]["accepted"]

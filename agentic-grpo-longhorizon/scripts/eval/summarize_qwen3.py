@@ -248,9 +248,46 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
             "saturated_outcome_groups_with_process_signal": saturated_with_process_signal,
             "signal_observed": signal_groups > 0,
         }
-        if not signal_groups:
+        distill = meta.get("distillation", {}).get("actor", {})
+        if distill.get("enabled", False) and distill.get("coef", 0) > 0:
+            required = {
+                "actor/opd_loss",
+                "actor/rl_loss",
+                "actor/opd_signal_token_fraction",
+                "actor/opd_coef",
+                "actor/rl_coef",
+                "distillation/scored_tokens",
+                "distillation/scored_trajectories",
+                "distillation/policy_version",
+            }
+            checks["distillation_metrics_complete"] = bool(actor_metrics) and all(
+                required.issubset(row.get("data", {}))
+                and all(finite_number(row["data"][key]) for key in required)
+                and row["data"]["distillation/scored_tokens"] > 0
+                and row["data"]["distillation/scored_trajectories"]
+                == meta["train_batch_size"] * meta["samples_per_task"]
+                and row["data"]["distillation/policy_version"] == row["step"] - 1
+                and 0 <= row["data"]["actor/opd_signal_token_fraction"] <= 1
+                and math.isclose(row["data"]["actor/opd_coef"], distill["coef"])
+                and math.isclose(row["data"]["actor/rl_coef"], distill["rl_coef"])
+                and (distill["rl_coef"] != 0 or row["data"]["actor/rl_loss"] == 0)
+                for row in actor_metrics
+            )
+            teacher_signal = any(
+                finite_number(
+                    row.get("data", {}).get("actor/opd_signal_token_fraction")
+                )
+                and row["data"]["actor/opd_signal_token_fraction"] > 0
+                for row in actor_metrics
+            )
+            learning["reward_signal_observed"] = signal_groups > 0
+            learning["distillation_signal_observed"] = teacher_signal
+            learning["signal_observed"] = teacher_signal or (
+                distill["rl_coef"] > 0 and signal_groups > 0
+            )
+        if not learning["signal_observed"]:
             learning["note"] = (
-                "No within-group training-reward variation: zero GRPO advantage is valid; learning signal remains unverified."
+                "No signal observed in enabled training objectives; zero GRPO advantage is valid when group rewards are constant."
             )
     else:
         checks["known_mode"] = False

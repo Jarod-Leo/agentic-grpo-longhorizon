@@ -343,6 +343,32 @@ class RayPPOTrainer:
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
+    def _score_distillation(self, batch: DataProto) -> dict:
+        """Finish all teacher scoring at a fixed student version before any update."""
+        settings = self.config.actor_rollout_ref.actor.get("distillation", {})
+        if not settings.get("enabled", False) or settings.get("coef", 0.0) == 0:
+            return {}
+        from hydra.utils import get_method
+
+        if self.config.actor_rollout_ref.rollout.temperature != 1.0:
+            raise ValueError("Sampled-token distillation requires temperature=1 scoring and rollout")
+        batch.meta_info["distillation_policy_version"] = self.global_steps - 1
+        scores, metrics = get_method(self.config.distillation.scorer)(
+            batch=batch,
+            config=self.config.distillation,
+            tokenizer=self.tokenizer,
+            actor_wg=self.actor_rollout_wg,
+        )
+        mask = batch.batch["response_mask"].bool()
+        if scores.shape != mask.shape or not torch.isfinite(scores).all():
+            raise ValueError("Teacher returned misaligned or nonfinite log-probabilities")
+        scores = scores.to(batch.batch["old_log_probs"].device)
+        if torch.any(scores[~mask] != 0):
+            raise ValueError("Teacher scored user, tool or padding positions")
+        batch.batch["teacher_log_probs"] = scores.detach()
+        metrics["distillation/policy_version"] = self.global_steps - 1
+        return metrics
+
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
         Creates the train and validation dataloaders.
@@ -1277,6 +1303,10 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
+
+                    # Freeze teacher scores for all minibatches/epochs before any update.
+                    with marked_timer("teacher_score", timing_raw, color="olive"):
+                        metrics.update(self._score_distillation(batch))
 
                     # update critic
                     if self.use_critic:

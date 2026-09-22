@@ -28,6 +28,7 @@ from torch.distributed.tensor import DTensor
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
+from verl.trainer.ppo.distillation_loss import compute_sampled_token_opd_loss, logprob_branch_grad_norm
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
@@ -374,6 +375,11 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_module.train()
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
+        distillation_config = self.config.get("distillation", None)
+        distillation_enabled = bool(distillation_config is not None and distillation_config.get("enabled", False))
+        rl_coef = float(distillation_config.get("rl_coef", 1.0)) if distillation_enabled else 1.0
+        opd_coef = float(distillation_config.get("coef", 0.0)) if distillation_enabled else 0.0
+        compute_opd = distillation_enabled and opd_coef != 0
 
         select_keys = [
             "responses",
@@ -384,6 +390,8 @@ class DataParallelPPOActor(BasePPOActor):
             "old_log_probs",
             "advantages",
         ]
+        if compute_opd:
+            select_keys.append("teacher_log_probs")
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
         # Include pre-computed IS weights if present in batch
@@ -425,6 +433,7 @@ class DataParallelPPOActor(BasePPOActor):
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
                     response_mask = model_inputs["response_mask"]
                     old_log_prob = model_inputs["old_log_probs"]
+                    fixed_old_log_prob = old_log_prob.detach()
                     advantages = model_inputs["advantages"]
 
                     entropy_coeff = self.config.entropy_coeff
@@ -442,6 +451,10 @@ class DataParallelPPOActor(BasePPOActor):
                     entropy, log_prob = self._forward_micro_batch(
                         model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
                     )
+                    if distillation_enabled:
+                        differentiable_zero = (
+                            torch.where(response_mask.bool(), log_prob, torch.zeros_like(log_prob)).sum() * 0
+                        )
 
                     # for fully_async_policy recipe
                     if hasattr(self.config, "use_rollout_log_probs") and self.config.use_rollout_log_probs:
@@ -461,23 +474,47 @@ class DataParallelPPOActor(BasePPOActor):
 
                     # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
                     # clip_cov -> verl.trainer.ppo.core_algos.compute_policy_loss_clip_cov
-                    policy_loss_fn = get_policy_loss_fn(loss_mode)
+                    if not distillation_enabled or rl_coef != 0:
+                        policy_loss_fn = get_policy_loss_fn(loss_mode)
 
-                    # Compute policy loss (any function is expected to return 2 values)
-                    pg_loss, pg_metrics = policy_loss_fn(
-                        old_log_prob=old_log_prob,
-                        log_prob=log_prob,
-                        advantages=advantages,
-                        response_mask=response_mask,
-                        loss_agg_mode=loss_agg_mode,
-                        config=self.config,
-                        rollout_is_weights=rollout_is_weights,
-                    )
+                        # Compute policy loss (any function is expected to return 2 values)
+                        pg_loss, pg_metrics = policy_loss_fn(
+                            old_log_prob=old_log_prob,
+                            log_prob=log_prob,
+                            advantages=advantages,
+                            response_mask=response_mask,
+                            loss_agg_mode=loss_agg_mode,
+                            config=self.config,
+                            rollout_is_weights=rollout_is_weights,
+                        )
+                    else:
+                        # Keep a differentiable zero while completely skipping the
+                        # reward/advantage policy-loss branch for pure OPD.
+                        pg_loss = differentiable_zero
+                        pg_metrics = {}
                     micro_batch_metrics.update(pg_metrics)
+
+                    if compute_opd:
+                        opd_loss, opd_metrics = compute_sampled_token_opd_loss(
+                            log_prob=log_prob,
+                            old_log_prob=fixed_old_log_prob,
+                            teacher_log_prob=model_inputs["teacher_log_probs"],
+                            response_mask=response_mask,
+                            loss_agg_mode=loss_agg_mode,
+                            clip_ratio_low=self.config.clip_ratio_low,
+                            clip_ratio_high=self.config.clip_ratio_high,
+                        )
+                        micro_batch_metrics.update(opd_metrics)
+                    elif distillation_enabled:
+                        opd_loss = differentiable_zero
 
                     # Skip if using pure rollout correction mode (metrics already in pg_metrics)
                     rollout_log_prob = model_inputs.get("rollout_log_probs", None)
-                    if loss_mode != "rollout_correction" and rollout_log_prob is not None:
+                    if (
+                        (not distillation_enabled or rl_coef != 0)
+                        and loss_mode != "rollout_correction"
+                        and rollout_log_prob is not None
+                    ):
                         # Compute metrics using CURRENT policy π_θ vs π_rollout
                         # Tracks evolving off-policy gap as π_θ updates during mini-batch training
                         from verl.trainer.ppo.rollout_corr_helper import compute_rollout_corr_metrics_from_logprobs
@@ -489,13 +526,28 @@ class DataParallelPPOActor(BasePPOActor):
                         )
                         micro_batch_metrics.update(rollout_corr_metrics)
 
+                    if distillation_enabled:
+                        policy_loss = rl_coef * pg_loss + opd_coef * opd_loss
+                        micro_batch_metrics["actor/rl_loss"] = pg_loss.detach().item() * loss_scale_factor
+                        micro_batch_metrics["actor/opd_loss"] = opd_loss.detach().item() * loss_scale_factor
+                        micro_batch_metrics["actor/rl_coef"] = rl_coef
+                        micro_batch_metrics["actor/opd_coef"] = opd_coef
+                        # These are coefficient-weighted branch gradients with
+                        # respect to sampled-token log_prob, not parameter gradients.
+                        micro_batch_metrics["actor/rl_logprob_grad_norm"] = logprob_branch_grad_norm(
+                            rl_coef * pg_loss, log_prob
+                        )
+                        micro_batch_metrics["actor/opd_logprob_grad_norm"] = logprob_branch_grad_norm(
+                            opd_coef * opd_loss, log_prob
+                        )
+                    else:
+                        policy_loss = pg_loss
+
                     if entropy_coeff != 0:
                         entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
                         # compute policy loss
-                        policy_loss = pg_loss - entropy_loss * entropy_coeff
-                    else:
-                        policy_loss = pg_loss
+                        policy_loss = policy_loss - entropy_loss * entropy_coeff
 
                     if self.config.use_kl_loss:
                         ref_log_prob = model_inputs["ref_log_prob"]

@@ -89,6 +89,16 @@ def main() -> None:
         "adv_estimator": adv_estimator,
         "lata_alpha": lata_alpha,
         "prm_coefficient": 0.3 if reward_mode == "prm_lite" else 0.0,
+        "distillation": {
+            "actor": OmegaConf.to_container(
+                method_config.actor_rollout_ref.actor.distillation, resolve=True
+            )
+            if "distillation" in method_config.actor_rollout_ref.actor
+            else {"enabled": False},
+            "teacher": OmegaConf.to_container(method_config.distillation, resolve=True)
+            if "distillation" in method_config
+            else None,
+        },
         "mode": args.mode,
         "eval_split": args.split,
         "train_task_ids": train,
