@@ -18,7 +18,11 @@ setup_qwen3_run() {
     export REPO=$(pwd)
     test -n "${SLURM_JOB_ID:-}" || { echo 'Run GPU work inside Slurm' >&2; exit 2; }
     test -n "${MIMO_API_KEY:-}" || { echo 'Activate setup/activate.sh to load MiMo credentials' >&2; exit 2; }
-    export RUN_DIR=${RUN_DIR:-$REPO/experiments/e01_vanilla_grpo/run-$SLURM_JOB_ID/$MODE}
+    local DEFAULT_RUN_DIR=$REPO/experiments/e01_vanilla_grpo/run-$SLURM_JOB_ID/$MODE
+    if [ -n "${RUN_ROOT:-}" ]; then
+        DEFAULT_RUN_DIR=$RUN_ROOT/$MODE
+    fi
+    export RUN_DIR="${RUN_DIR:-$DEFAULT_RUN_DIR}"
     export EXP_NAME=${EXP_NAME:-qwen3_${MODE}_${SLURM_JOB_ID}}
     export RAY_TMPDIR=${RAY_TMPDIR:-/projects/_ssd/jiatian001ssd/q-$SLURM_JOB_ID}
     export POLICY_MODEL=${POLICY_MODEL:-/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/models/Qwen/Qwen3-8B}
@@ -45,6 +49,11 @@ setup_qwen3_run() {
     STEPS=${STEPS:-3}
     SAMPLES=${SAMPLES:-8}
     local -a prepare=(--mode "$MODE" --split "${EVAL_SPLIT:-train}" --steps "$STEPS" --samples "$SAMPLES")
+    local CONFIG_NAME=eval_qwen3
+    if [ "$MODE" = train ]; then
+        CONFIG_NAME=${QWEN3_CONFIG:-qwen3_mimo}
+    fi
+    prepare+=(--config-name "$CONFIG_NAME")
     prepare+=(--save-freq "${SAVE_FREQ:-1}" --eval-freq "${EVAL_FREQ:--1}" --eval-samples "${EVAL_SAMPLES:-8}"
         --checkpoint-root "$CHECKPOINT_ROOT")
     QWEN3_OVERRIDES=()
@@ -59,6 +68,7 @@ setup_qwen3_run() {
     fi
     python scripts/train/grpo/prepare_qwen3_run.py "$RUN_DIR" "${prepare[@]}"
     export EXPECTED_TRAJECTORIES=$(python -c 'import json,os; print(json.load(open(os.path.join(os.environ["RUN_DIR"],"run.json")))["expected_trajectories"])')
+    export TAU_REWARD_MODE=$(python -c 'import json,os; print(json.load(open(os.path.join(os.environ["RUN_DIR"],"run.json")))["reward_mode"])')
     python -c 'import torch; assert torch.cuda.device_count() == 1; print("GPU:", torch.cuda.get_device_name(0), flush=True)'
     if [ "$MODE" = eval ]; then
         QWEN3_OVERRIDES+=("actor_rollout_ref.rollout.val_kwargs.n=$SAMPLES")

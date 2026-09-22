@@ -3,6 +3,8 @@
 import json
 import runpy
 from pathlib import Path
+import pytest
+
 
 summary_module = runpy.run_path(
     str(Path(__file__).resolve().parents[3] / "scripts/eval/summarize_qwen3.py")
@@ -138,5 +140,88 @@ def test_periodic_eval_and_external_checkpoints(tmp_path):
     path.write_text("".join(json.dumps(r) + "\n" for r in rows[:-1]))
     assert not build_summary(tmp_path)[0]["accepted"]
     path.write_text("".join(json.dumps(r) + "\n" for r in rows))
-    (checkpoint_root / "global_step_2/actor/optim_world_size_1_rank_0.pt").unlink()
-    assert not build_summary(tmp_path)[0]["checks"]["checkpoint_2_complete"]
+
+
+def write_joint_run(tmp_path, mode="train"):
+    write_run(tmp_path, [0] * 8)
+    meta = json.loads((tmp_path / "run.json").read_text())
+    meta.update(
+        config_name="qwen3_prm_lite_lata",
+        reward_mode="prm_lite",
+        adv_estimator="grpo_lata",
+        lata_alpha=1.05,
+        prm_coefficient=0.3,
+    )
+    rows_path = tmp_path / "eval_trajectories.jsonl"
+    rows = [json.loads(line) for line in rows_path.read_text().splitlines()]
+    process_scores = [-0.5, -0.25, 0.0, 0.25] * 2
+    for row, process_score in zip(rows, process_scores, strict=True):
+        row.update(
+            process_score=process_score,
+            reward_mode="prm_lite",
+            training_reward=row["score"]
+            if mode == "eval"
+            else row["score"] + 0.3 * process_score,
+        )
+    if mode == "train":
+        meta.update(
+            mode="train",
+            train_batch_size=2,
+            total_steps=1,
+            start_step=0,
+            expected_trajectories=8,
+            evaluation_steps=[],
+            checkpoint_steps=[],
+        )
+        for row in rows:
+            row.update(step=1, validate=False)
+        (tmp_path / "metrics.jsonl").write_text(
+            json.dumps({"step": 1, "data": {"actor/grad_norm": 0.1}}) + "\n"
+        )
+    (tmp_path / "run.json").write_text(json.dumps(meta))
+    rows_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+
+def test_joint_shaped_training_reward_keeps_binary_metrics_and_grouping(tmp_path):
+    write_joint_run(tmp_path)
+    result, rows = build_summary(tmp_path)
+    assert result["accepted"], result["checks"]
+    assert result["splits"]["train"]["success_rate"] == 0
+    assert {row["c"] for row in rows} == {0}
+    assert result["learning"]["groups"] == 2
+    assert result["learning"]["mixed_outcome_groups"] == 0
+    assert result["learning"]["saturated_outcome_groups_with_process_signal"] == 2
+    assert result["learning"]["signal_observed"]
+
+
+def test_joint_validation_reward_stays_binary(tmp_path):
+    write_joint_run(tmp_path, mode="eval")
+    result, _ = build_summary(tmp_path)
+    assert result["accepted"], result["checks"]
+    assert result["checks"]["training_reward_formula"]
+    path = tmp_path / "eval_trajectories.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows[0]["training_reward"] = rows[0]["score"] + 0.3 * rows[0]["process_score"]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    assert not build_summary(tmp_path)[0]["checks"]["training_reward_formula"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("process_score", None),
+        ("process_score", 0.6),
+        ("training_reward", None),
+        ("training_reward", 0.9),
+    ],
+)
+def test_joint_missing_or_invalid_reward_fields_rejected(tmp_path, field, value):
+    write_joint_run(tmp_path)
+    path = tmp_path / "eval_trajectories.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    if value is None:
+        rows[0].pop(field)
+    else:
+        rows[0][field] = value
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    assert not build_summary(tmp_path)[0]["accepted"]

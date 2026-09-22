@@ -24,6 +24,14 @@ from src.evaluation.run_metrics import (
 )
 
 
+def finite_number(value) -> bool:
+    return (
+        isinstance(value, (float, int))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
 def build_summary(run: Path) -> tuple[dict, list[dict]]:
     errors = []
     meta, err = read_json(run / "run.json", {})
@@ -80,6 +88,52 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
         "api_no_terminal_failure": bool(api)
         and all(row.get("success") or row.get("retry") for row in api),
     }
+    if "reward_mode" in meta:
+        reward_mode = meta.get("reward_mode")
+        coefficient = meta.get("prm_coefficient")
+        adv_estimator = meta.get("adv_estimator")
+        lata_alpha = meta.get("lata_alpha")
+
+        def reward_formula_matches(row: dict) -> bool:
+            outcome = row.get("score")
+            process_score = row.get("process_score")
+            training_reward = row.get("training_reward")
+            if not all(
+                finite_number(value)
+                for value in (outcome, process_score, training_reward)
+            ):
+                return False
+            expected = float(outcome)
+            is_training = mode == "train" and not row.get("validate", False)
+            if is_training and reward_mode == "prm_lite":
+                expected += float(coefficient) * float(process_score)
+            return math.isclose(
+                float(training_reward), expected, rel_tol=1e-6, abs_tol=1e-6
+            )
+
+        expected_coefficient = 0.3 if reward_mode == "prm_lite" else 0.0
+        checks.update(
+            {
+                "reward_configuration": reward_mode in {"binary", "prm_lite"}
+                and finite_number(coefficient)
+                and math.isclose(float(coefficient), expected_coefficient)
+                and isinstance(adv_estimator, str)
+                and bool(adv_estimator)
+                and (adv_estimator != "grpo_lata" or finite_number(lata_alpha)),
+                "reward_mode_matches": bool(rows)
+                and all(row.get("reward_mode") == reward_mode for row in rows),
+                "process_scores_finite_bounded": bool(rows)
+                and all(
+                    finite_number(row.get("process_score"))
+                    and -0.5 <= row["process_score"] <= 0.5
+                    for row in rows
+                ),
+                "training_rewards_finite": bool(rows)
+                and all(finite_number(row.get("training_reward")) for row in rows),
+                "training_reward_formula": bool(rows)
+                and all(reward_formula_matches(row) for row in rows),
+            }
+        )
     learning = {}
     evaluations = {}
     if mode == "eval":
@@ -154,21 +208,49 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
                     "actor/lora_adapter/adapter_model.safetensors",
                 )
             )
-        successes = defaultdict(list)
+        reward_groups = defaultdict(list)
         for row in training_rows:
-            successes[(row.get("step"), row.get("task_id"))].append(row.get("score"))
+            reward_groups[(row.get("step"), row.get("task_id"))].append(row)
         mixed = sum(
-            any(v == 0 for v in values) and any(v == 1 for v in values)
-            for values in successes.values()
+            any(row.get("score") == 0 for row in group)
+            and any(row.get("score") == 1 for row in group)
+            for group in reward_groups.values()
+        )
+
+        def group_has_training_signal(group: list[dict]) -> bool:
+            values = [
+                row.get("training_reward")
+                if "reward_mode" in meta
+                else row.get("score")
+                for row in group
+            ]
+            return (
+                all(finite_number(value) for value in values)
+                and max(values) - min(values) > 1e-12
+            )
+
+        signal_groups = sum(
+            group_has_training_signal(group) for group in reward_groups.values()
+        )
+        saturated_with_process_signal = sum(
+            not (
+                any(row.get("score") == 0 for row in group)
+                and any(row.get("score") == 1 for row in group)
+            )
+            and group_has_training_signal(group)
+            for group in reward_groups.values()
         )
         learning = {
-            "groups": len(successes),
+            "groups": len(reward_groups),
             "mixed_outcome_groups": mixed,
-            "signal_observed": mixed > 0,
+            "training_reward_signal_groups": signal_groups,
+            "saturated_outcome_groups": len(reward_groups) - mixed,
+            "saturated_outcome_groups_with_process_signal": saturated_with_process_signal,
+            "signal_observed": signal_groups > 0,
         }
-        if not mixed:
+        if not signal_groups:
             learning["note"] = (
-                "No mixed-outcome group: zero GRPO advantage is valid; learning signal remains unverified."
+                "No within-group training-reward variation: zero GRPO advantage is valid; learning signal remains unverified."
             )
     else:
         checks["known_mode"] = False
@@ -235,6 +317,7 @@ def write_outputs(run: Path, summary: dict, task_rows: list[dict]) -> None:
         )
     lines += [
         "",
+        "成功率指标仅使用二元 outcome；shaped training_reward 仅用于训练与学习信号诊断。",
         "训练轨迹的指标仅用于诊断；模型效果以固定 checkpoint 的独立评测为准。未完成运行不构成可比较结果。",
         "",
         f"失败检查：{[key for key, ok in summary['checks'].items() if not ok]}。",

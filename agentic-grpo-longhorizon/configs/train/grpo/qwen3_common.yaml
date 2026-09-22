@@ -1,4 +1,6 @@
 # Shared Qwen3 + MiMo vanilla GRPO configuration; evaluation overrides only its mode.
+tau_bench_reward_mode: binary
+
 hydra:
   run:
     dir: ${oc.env:RUN_DIR}/hydra

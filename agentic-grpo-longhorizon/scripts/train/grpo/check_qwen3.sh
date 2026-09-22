@@ -9,10 +9,12 @@ mkdir -p "$RUN_DIR"
 export CHECKPOINT_ROOT=$RUN_ROOT/checkpoints CHECKPOINT_ARCHIVE_ROOT=$RUN_ROOT/archive
 python -m pytest -q src/envs/tests/test_mimo_client.py src/envs/tests/test_tau_bench_input.py src/evaluation/tests/test_pass_metrics.py \
     src/evaluation/tests/test_qwen3_summary.py src/envs/tests/test_agent_loop_lifecycle.py src/evaluation/tests/test_e00_summary.py \
-    ../verl/tests/trainer/ppo/test_grpo_signal_on_cpu.py
+    src/envs/tests/test_prm_lite_v4.py src/envs/tests/test_tau_bench_joint_loop.py \
+    src/evaluation/tests/test_qwen3_checkpoint.py ../verl/tests/trainer/ppo/test_grpo_signal_on_cpu.py \
+    ../verl/tests/trainer/ppo/test_grpo_lata_on_cpu.py
 python scripts/train/grpo/prepare_qwen3_run.py "$RUN_DIR" --mode train
 python - "$RUN_ROOT" <<'PY'
-import sys,yaml
+import copy,sys,yaml
 from pathlib import Path
 from transformers import AutoTokenizer
 from hydra import compose, initialize_config_dir
@@ -24,12 +26,21 @@ def config(directory, name, output):
     (root/output).write_text(yaml.safe_dump(resolved))
     return resolved
 train=config('configs/train/grpo','qwen3_mimo','train_config.yaml')
+joint=config('configs/train/grpo','qwen3_prm_lite_lata','joint_config.yaml')
 eval_config=config('configs/eval/qwen3','eval_qwen3','eval_config.yaml')
 formal=config('configs/train/grpo','qwen3_formal','formal_config.yaml')
 assert formal['trainer']['total_training_steps']==200
 assert formal['trainer']['total_epochs']==20
 assert formal['trainer']['save_freq']==50 and formal['trainer']['test_freq']==100
 assert formal['actor_rollout_ref']['actor']['ppo_max_token_len_per_gpu']==32768
+assert joint['tau_bench_reward_mode']=='prm_lite'
+assert joint['algorithm']['adv_estimator']=='grpo_lata'
+assert joint['algorithm']['turn_discount']=={'enable':True,'alpha':1.05}
+joint_comparable=copy.deepcopy(joint)
+joint_comparable['tau_bench_reward_mode']=formal['tau_bench_reward_mode']
+joint_comparable['algorithm']['adv_estimator']=formal['algorithm']['adv_estimator']
+joint_comparable['algorithm'].pop('turn_discount')
+assert joint_comparable==formal, 'Joint config differs from E01 outside PRM-Lite and LATA'
 assert formal['actor_rollout_ref']['rollout']['val_kwargs']['n']==8
 fast=config('configs/train/grpo','qwen3_unpad','fast_config.yaml')
 assert fast['actor_rollout_ref']['model']['use_remove_padding']
@@ -65,12 +76,16 @@ print('CONFIG_AND_TOKENIZER_OK prompt_tokens=',len(tokens))
 PY
 
 mkdir -p "$RUN_ROOT/formal-input-check"
-python scripts/train/grpo/prepare_qwen3_run.py "$RUN_ROOT/formal-input-check" --mode train --steps 200 --save-freq 50 --eval-freq 100 --eval-samples 8 --checkpoint-root "$CHECKPOINT_ROOT"
+python scripts/train/grpo/prepare_qwen3_run.py "$RUN_ROOT/formal-input-check" --mode train --config-name qwen3_prm_lite_lata \
+    --steps 200 --save-freq 50 --eval-freq 100 --eval-samples 8 --checkpoint-root "$CHECKPOINT_ROOT"
 python - "$RUN_ROOT/formal-input-check/run.json" <<'PY_CHECK'
 import json,sys
 meta=json.load(open(sys.argv[1]))
 assert meta['checkpoint_steps']==[50,100,150,200]
 assert meta['evaluation_steps']==[100,200]
 assert meta['expected_trajectories']==7040
-print('FORMAL_INPUTS_OK steps=200 training=6400 evaluation=640')
+assert meta['config_name']=='qwen3_prm_lite_lata'
+assert meta['reward_mode']=='prm_lite' and meta['prm_coefficient']==0.3
+assert meta['adv_estimator']=='grpo_lata' and meta['lata_alpha']==1.05
+print('JOINT_FORMAL_INPUTS_OK steps=200 training=6400 evaluation=640')
 PY_CHECK

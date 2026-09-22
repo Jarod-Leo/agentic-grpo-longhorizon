@@ -1,0 +1,25 @@
+# E05: E01's controlled Qwen3 setup with PRM-Lite reward and LATA advantage.
+hydra:
+  searchpath:
+    - pkg://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - qwen3_common
+  - qwen3_performance
+  - _self_
+
+tau_bench_reward_mode: prm_lite
+
+algorithm:
+  adv_estimator: grpo_lata
+  turn_discount:
+    enable: true
+    alpha: 1.05
+
+trainer:
+  total_epochs: 20
+  total_training_steps: 200
+  save_freq: 50
+  test_freq: 100
+  checkpoint_archive_dir: ${oc.env:CHECKPOINT_ARCHIVE_ROOT}

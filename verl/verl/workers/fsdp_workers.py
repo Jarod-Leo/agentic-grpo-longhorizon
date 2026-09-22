@@ -445,11 +445,26 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
                 if init_seed is not None and self.rank == 0:
                     digest = hashlib.sha256()
+                    lora_b_nonzero = lora_b_numel = 0
                     for name, parameter in sorted(actor_module.named_parameters()):
                         if parameter.requires_grad:
+                            value = parameter.detach().cpu().contiguous()
                             digest.update(name.encode())
-                            digest.update(parameter.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes())
-                    print("LORA_INITIALIZATION " + json.dumps({"seed": init_seed, "sha256": digest.hexdigest()}))
+                            digest.update(value.view(torch.uint8).numpy().tobytes())
+                            if "lora_B" in name:
+                                lora_b_nonzero += torch.count_nonzero(value).item()
+                                lora_b_numel += value.numel()
+                    print(
+                        "LORA_INITIALIZATION "
+                        + json.dumps(
+                            {
+                                "seed": init_seed,
+                                "sha256": digest.hexdigest(),
+                                "lora_b_nonzero": lora_b_nonzero,
+                                "lora_b_numel": lora_b_numel,
+                            }
+                        )
+                    )
 
         self.use_orig_params = fsdp_config.get("use_orig_params", False)
         if self.config.actor.get("freeze_vision_tower", False):

@@ -5,7 +5,7 @@ interaction:
       env_name: airline
       task_split: test
       max_turns: 30
-      reward_mode: binary
+      reward_mode: ${oc.env:TAU_REWARD_MODE,binary}
       user_backend: mimo
       user_strategy: llm
       user_model: mimo-v2.5

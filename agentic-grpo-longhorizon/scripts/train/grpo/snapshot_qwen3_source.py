@@ -24,6 +24,7 @@ def main() -> None:
         "tau-bench/tau_bench",
         "agentic-grpo-longhorizon/experiments/e00_qwen3_baseline/split.json",
         "verl/tests/trainer/ppo/test_grpo_signal_on_cpu.py",
+        "verl/tests/trainer/ppo/test_grpo_lata_on_cpu.py",
     ]
     manifest = {}
     for source in sources:
@@ -33,7 +34,7 @@ def main() -> None:
             if (
                 not file.is_file()
                 or "__pycache__" in file.parts
-                or file.suffix in {".pyc", ".pt", ".parquet"}
+                or file.suffix in {".orig", ".parquet", ".pt", ".pyc", ".rej"}
             ):
                 continue
             relative = file.relative_to(root)

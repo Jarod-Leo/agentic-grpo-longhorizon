@@ -1,0 +1,35 @@
+{
+  "checked_at_utc": "2026-09-22T15:56:50.372887+00:00",
+  "job_id": "166634",
+  "state": "COMPLETED",
+  "exit_code": "0:0",
+  "elapsed_s": 39,
+  "pytest": {
+    "passed": 94,
+    "warnings": 7,
+    "elapsed_s": 17.43
+  },
+  "configuration_comparison": "E05 equals E01 formal except tau_bench_reward_mode, adv_estimator and turn_discount",
+  "tokenizer_prompt_tokens": 3929,
+  "expected_trajectories": 7040,
+  "checkpoint_steps": [
+    50,
+    100,
+    150,
+    200
+  ],
+  "evaluation_steps": [
+    100,
+    200
+  ],
+  "config_name": "qwen3_prm_lite_lata",
+  "reward_mode": "prm_lite",
+  "adv_estimator": "grpo_lata",
+  "prm_coefficient": 0.3,
+  "lata_alpha": 1.05,
+  "split_sha256": "33f3c6399c81ed641e096dae438939b7121bba953f0dae7a5b86c640f66c3fb9",
+  "source_manifest_sha256": "cc0ef75425ab16133850e35e458435213821c08344d1f0ea5ebcac0cdf638bc4",
+  "gpu_smoke": "PENDING; not yet validated",
+  "stdout": "cpu-check-v1/slurm-166634.out",
+  "stderr": "cpu-check-v1/slurm-166634.err"
+}

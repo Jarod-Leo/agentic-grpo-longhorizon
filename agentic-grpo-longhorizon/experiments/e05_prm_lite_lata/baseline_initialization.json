@@ -1,0 +1,8 @@
+{
+  "source_job": "165407",
+  "source_run": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/formal-seed42-200-v3/train",
+  "initialization": {
+    "seed": 42,
+    "sha256": "484707a71d2b7b30885effb73c507e7665241b65b033d9c4887b195b4cd59af0"
+  }
+}

@@ -1,8 +1,10 @@
 """Shared tau-bench input protocol and trajectory instrumentation."""
 
 import json
+import math
 import os
 import time
+from numbers import Real
 from pathlib import Path
 
 import yaml
@@ -19,6 +21,15 @@ def append_record(record):
 
 
 class TauBenchAgentLoop(AuditedToolAgentLoop):
+    @staticmethod
+    def _finite_float(value, name):
+        assert isinstance(value, Real) and not isinstance(value, bool), (
+            f"{name} must be a numeric scalar"
+        )
+        value = float(value)
+        assert math.isfinite(value), f"{name} must be finite"
+        return value
+
     async def _handle_pending_state(self, data, sampling_params):
         self.eval_data = data
         assert len(data.messages) == 1 and data.messages[0]["role"] == "system", (
@@ -93,18 +104,61 @@ class TauBenchAgentLoop(AuditedToolAgentLoop):
         try:
             output = await super().run(sampling_params, **kwargs)
             data = self.eval_data
-            assert data is not None and output.reward_score in (0, 1), (
-                "Missing binary outcome"
+            assert data is not None, "Missing trajectory data"
+
+            interaction_reward_mode = getattr(data.interaction, "reward_mode", None)
+            assert interaction_reward_mode in {"binary", "prm_lite"}, (
+                f"Unsupported interaction reward mode: {interaction_reward_mode!r}"
             )
+            reward_mode = self.config.get("tau_bench_reward_mode", "binary")
+            assert reward_mode == interaction_reward_mode, (
+                "Trainer tau_bench_reward_mode does not match interaction "
+                f"reward_mode: {reward_mode!r} != {interaction_reward_mode!r}"
+            )
+            outcome_reward = self._finite_float(
+                output.extra_fields.get("outcome_reward"), "outcome_reward"
+            )
+            assert outcome_reward in (0.0, 1.0), "outcome_reward must be binary"
+            process_score = self._finite_float(
+                output.extra_fields.get("process_score"), "process_score"
+            )
+            assert -0.5 <= process_score <= 0.5, (
+                "process_score must be within [-0.5, 0.5]"
+            )
+            raw_training_reward = self._finite_float(
+                output.reward_score, "training_reward"
+            )
+            expected_reward = outcome_reward
+            if reward_mode == "prm_lite":
+                expected_reward += 0.3 * process_score
+            assert math.isclose(
+                raw_training_reward,
+                expected_reward,
+                rel_tol=1e-6,
+                abs_tol=1e-6,
+            ), (
+                "training_reward does not match configured tau-bench reward: "
+                f"{raw_training_reward} != {expected_reward}"
+            )
+
+            trajectory = kwargs.get("trajectory") or {}
+            is_validation = bool(trajectory.get("validate", False))
+            training_reward = (
+                outcome_reward if is_validation else float(output.reward_score)
+            )
+            output.reward_score = training_reward
             info = kwargs["extra_info"]
             record = {
                 "protocol": info.get("protocol"),
-                "step": kwargs.get("trajectory", {}).get("step"),
-                "validate": kwargs.get("trajectory", {}).get("validate", False),
+                "step": trajectory.get("step"),
+                "validate": is_validation,
                 "trajectory_id": data.request_id,
                 "task_id": int(info["task_id"]),
                 "split": info["split"],
-                "score": output.reward_score,
+                "score": outcome_reward,
+                "training_reward": training_reward,
+                "process_score": process_score,
+                "reward_mode": reward_mode,
                 "termination": self.eval_termination,
                 "assistant_turns": data.assistant_turns,
                 "user_turns": data.user_turns,

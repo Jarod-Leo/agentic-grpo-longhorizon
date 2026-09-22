@@ -15,6 +15,7 @@ from src.envs.baseline_eval_agent_loop import BaselineEvalAgentLoop
 
 class FakeInteraction:
     def __init__(self):
+        self.reward_mode = "binary"
         self.finalized = []
 
     async def finalize_interaction(self, request_id):
@@ -28,6 +29,7 @@ class FakeTokenizer:
 
 def make_loop():
     loop = object.__new__(BaselineEvalAgentLoop)
+    loop.config = {}
     loop.tokenizer = FakeTokenizer()
     return loop
 
@@ -49,6 +51,7 @@ def make_output(reward_score):
         prompt_ids=[10, 11],
         response_ids=[20, 21, 99],
         response_mask=[1, 0, 1],
+        extra_fields={"outcome_reward": reward_score, "process_score": 0.0},
     )
 
 
@@ -92,7 +95,7 @@ async def test_missing_reward_fails_instead_of_becoming_zero(monkeypatch, tmp_pa
     trajectory_path = tmp_path / "trajectories.jsonl"
     monkeypatch.setenv("E00_TRAJECTORIES_PATH", str(trajectory_path))
 
-    with pytest.raises(AssertionError, match="Missing binary outcome"):
+    with pytest.raises(AssertionError, match="outcome_reward must be a numeric scalar"):
         await make_loop().run({}, extra_info={"task_id": 7, "split": "dev"})
 
     assert not trajectory_path.exists()

@@ -393,7 +393,7 @@ def compute_grpo_turn_discounted_outcome_advantage(
         # Stable normalization: weights = exp(log_weights) * active_count / sum(exp(log_weights)*mask)
         # Shift by max for numerical stability
         log_weights_masked = log_weights.clone()
-        log_weights_masked[response_mask == 0] = -float('inf')
+        log_weights_masked[response_mask == 0] = -float("inf")
         log_weights_max = log_weights_masked.max(dim=1, keepdim=True).values
         log_weights_stable = log_weights - log_weights_max
         weights_stable = torch.exp(log_weights_stable)
@@ -419,16 +419,17 @@ def compute_grpo_lata_outcome_advantage(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     LATA: Length-Aware Turn-weighted Advantage.
-    Two-stage design:
-      1. Turn-discount: earlier tokens get higher weight (alpha^(L-1-t))
-      2. Length-aware normalization: divide by sqrt(L) instead of L
-         to preserve incentive for longer reasoning trajectories.
+      1. Give earlier absolute response positions higher exponential weight.
+      2. Normalize active position weights to mean one.
+      3. Divide the weighted advantage by sqrt(active response token count).
     """
     alpha = 1.05
     if config is not None:
         td_config = getattr(config, "turn_discount", None)
         if td_config is not None:
             alpha = float(getattr(td_config, "alpha", 1.05))
+    if not math.isfinite(alpha) or alpha <= 0:
+        raise ValueError(f"LATA alpha must be finite and positive, got {alpha}")
 
     # Step 1: standard GRPO advantage (group normalize)
     scores = token_level_rewards.sum(dim=-1)
@@ -458,25 +459,22 @@ def compute_grpo_lata_outcome_advantage(
 
         # Step 2: turn-discount weights
         resp_len = response_mask.shape[1]
+        active_mask = response_mask.bool()
+        active_lengths = active_mask.sum(dim=1, keepdim=True).to(torch.float64)
+        if torch.any(active_lengths == 0):
+            raise ValueError("LATA requires at least one active response token per trajectory")
         positions = torch.arange(resp_len, device=response_mask.device, dtype=torch.float64)
-        active_lengths = response_mask.sum(dim=1, keepdim=True).clamp(min=1).to(torch.float64)
         exponents = active_lengths - 1 - positions.unsqueeze(0)
         log_weights = exponents * math.log(alpha)
-        log_weights = log_weights * response_mask.to(torch.float64)
-        log_weights_masked = log_weights.clone()
-        log_weights_masked[response_mask == 0] = -float('inf')
+        log_weights_masked = log_weights.masked_fill(~active_mask, -float("inf"))
         log_weights_max = log_weights_masked.max(dim=1, keepdim=True).values
-        log_weights_stable = log_weights - log_weights_max
-        weights_stable = torch.exp(log_weights_stable)
-        weight_sum = (weights_stable * response_mask.to(torch.float64)).sum(dim=1, keepdim=True).clamp(min=epsilon)
-        active_count = active_lengths
-        weights = (weights_stable * active_count / weight_sum).to(torch.float32)
+        weights_stable = torch.exp(log_weights_masked - log_weights_max)
+        weights_stable = weights_stable.masked_fill(~active_mask, 0.0)
+        weight_sum = weights_stable.sum(dim=1, keepdim=True).clamp(min=epsilon)
+        weights = weights_stable * active_lengths / weight_sum
+        weights = weights.masked_fill(~active_mask, 0.0).to(torch.float32)
 
-        # Step 3: length-aware normalization
-        # Instead of implicit linear division by L (in token-mean loss aggregation),
-        # explicitly divide by sqrt(L) to preserve long-trajectory incentive.
-        # Rationale: per-token gradient ~ A / sqrt(L) decays sublinearly,
-        # keeping "willingness to write longer reasoning" alive.
+        # Step 3: apply the explicit length-aware sqrt(active token count) divisor.
         length_norm = torch.sqrt(active_lengths).to(torch.float32)
         scores = scores.unsqueeze(-1) * weights * response_mask / length_norm
 

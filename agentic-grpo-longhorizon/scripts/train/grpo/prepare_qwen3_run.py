@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 
 import pandas as pd
+from hydra import compose, initialize_config_dir
+from omegaconf import OmegaConf
 from build_grpo_parquet import PROTOCOL, build_rows
 
 
@@ -25,8 +27,24 @@ def main() -> None:
     parser.add_argument("--checkpoint-root", type=Path)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--adapter", type=Path)
+    parser.add_argument("--config-name")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[3]
+    config_name = args.config_name or (
+        "qwen3_mimo" if args.mode == "train" else "eval_qwen3"
+    )
+    config_dir = root / (
+        "configs/train/grpo" if args.mode == "train" else "configs/eval/qwen3"
+    )
+    with initialize_config_dir(config_dir=str(config_dir), version_base=None):
+        method_config = compose(config_name=config_name)
+    reward_mode = str(
+        OmegaConf.select(method_config, "tau_bench_reward_mode", default="binary")
+    )
+    adv_estimator = str(OmegaConf.select(method_config, "algorithm.adv_estimator"))
+    lata_alpha = OmegaConf.select(method_config, "algorithm.turn_discount.alpha")
+    lata_alpha = float(lata_alpha) if lata_alpha is not None else None
+    assert reward_mode in {"binary", "prm_lite"}
     split_path = root / "experiments/sft_collect_airline/split.json"
     split = json.loads(split_path.read_text())
     train, test = split["seen_task_ids"], split["unseen_task_ids"]
@@ -66,6 +84,11 @@ def main() -> None:
     evaluation_steps = scheduled_steps(args.eval_freq)
     metadata = {
         "protocol": PROTOCOL,
+        "config_name": config_name,
+        "reward_mode": reward_mode,
+        "adv_estimator": adv_estimator,
+        "lata_alpha": lata_alpha,
+        "prm_coefficient": 0.3 if reward_mode == "prm_lite" else 0.0,
         "mode": args.mode,
         "eval_split": args.split,
         "train_task_ids": train,
@@ -92,7 +115,8 @@ def main() -> None:
     }
     (args.run / "run.json").write_text(json.dumps(metadata, indent=2) + "\n")
     print(
-        f"INPUTS_READY protocol={PROTOCOL} mode={args.mode} trajectories={metadata['expected_trajectories']}"
+        f"INPUTS_READY protocol={PROTOCOL} mode={args.mode} config={config_name} "
+        f"reward={reward_mode} trajectories={metadata['expected_trajectories']}"
     )
 
 
