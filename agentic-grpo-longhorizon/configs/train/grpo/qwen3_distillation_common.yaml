@@ -1,0 +1,24 @@
+# Shared teacher, objective defaults and formal schedule for distillation methods.
+distillation:
+  scorer: src.training.distillation.score_external_teacher
+  teacher_mode: external
+  teacher_model_id: Qwen/Qwen3-32B
+  teacher_model_path: ${oc.env:TEACHER_MODEL,/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/models/Qwen/Qwen3-32B}
+  teacher_revision: 9216db5781bf21249d130ec9da846c4624c16137
+  endpoint: ${oc.env:TEACHER_ENDPOINT,http://127.0.0.1:18932}
+  timeout_s: 600
+
+actor_rollout_ref:
+  actor:
+    distillation:
+      _target_: verl.workers.config.actor.DistillationConfig
+      enabled: true
+      rl_coef: 0.0
+      coef: 1.0
+
+trainer:
+  total_epochs: 20
+  total_training_steps: 200
+  save_freq: 50
+  test_freq: 100
+  checkpoint_archive_dir: ${oc.env:CHECKPOINT_ARCHIVE_ROOT}

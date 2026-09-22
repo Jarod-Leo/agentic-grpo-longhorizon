@@ -22,11 +22,15 @@ root = Path(os.environ["RUN_ROOT"])
 names = os.environ.get("DISTILLATION_CONFIGS", "qwen3_opd").split(",")
 with initialize_config_dir(config_dir=str(Path("configs/train/grpo").resolve()), version_base=None):
     baseline = OmegaConf.to_container(compose(config_name="qwen3_formal"), resolve=True)
+    resolved_configs = {}
+    expected_coefficients = {"qwen3_opd": (0.0, 1.0), "qwen3_grpo_opd": (1.0, 0.3)}
     for name in names:
         config = compose(config_name=name)
         resolved = OmegaConf.to_container(config, resolve=True)
         actor = omega_conf_to_dataclass(config.actor_rollout_ref.actor)
         assert actor.distillation.enabled
+        assert (actor.distillation.rl_coef, actor.distillation.coef) == expected_coefficients[name]
+        resolved_configs[name] = resolved
         assert not resolved["actor_rollout_ref"]["actor"]["use_kl_loss"]
         assert resolved["actor_rollout_ref"]["actor"]["entropy_coeff"] == 0
         comparable = copy.deepcopy(resolved)
@@ -35,6 +39,10 @@ with initialize_config_dir(config_dir=str(Path("configs/train/grpo").resolve()),
         assert comparable == baseline, name + " changed baseline outside distillation"
         (root / (name + "_resolved.json")).write_text(json.dumps(resolved, indent=2) + "\n")
         print("DISTILLATION_CONFIG_OK", name, "rl_coef", actor.distillation.rl_coef, "coef", actor.distillation.coef)
+if "qwen3_grpo_opd" in resolved_configs:
+    comparable = copy.deepcopy(resolved_configs["qwen3_grpo_opd"])
+    comparable["actor_rollout_ref"]["actor"]["distillation"].update(rl_coef=0.0, coef=1.0)
+    assert comparable == resolved_configs["qwen3_opd"], "E07 differs from E06 outside objective coefficients"
 student = AutoTokenizer.from_pretrained(os.environ["POLICY_MODEL"], local_files_only=True)
 teacher_path = os.environ.get("TEACHER_MODEL", "/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/models/Qwen/Qwen3-32B")
 teacher = AutoTokenizer.from_pretrained(teacher_path, local_files_only=True)

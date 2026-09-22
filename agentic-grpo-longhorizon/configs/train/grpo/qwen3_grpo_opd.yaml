@@ -1,4 +1,4 @@
-# E06: pure OPD; task rewards are diagnostics only.
+# E07: independent GRPO and sampled-token OPD objectives.
 hydra:
   searchpath:
     - pkg://verl/trainer/config
@@ -9,3 +9,9 @@ defaults:
   - qwen3_performance
   - qwen3_distillation_common
   - _self_
+
+actor_rollout_ref:
+  actor:
+    distillation:
+      rl_coef: 1.0
+      coef: 0.3

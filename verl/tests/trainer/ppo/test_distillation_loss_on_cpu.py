@@ -136,7 +136,8 @@ def make_fake_actor(distillation, ppo_epochs=1):
         return None, self.actor_module.sampled_log_prob.unsqueeze(0).expand(batch_size, -1)
 
     def optimizer_step(self):
-        grad_norm = torch.linalg.vector_norm(self.actor_module.sampled_log_prob.grad.detach())
+        self.last_parameter_grad = self.actor_module.sampled_log_prob.grad.detach().clone()
+        grad_norm = torch.linalg.vector_norm(self.last_parameter_grad)
         self.actor_optimizer.step()
         return grad_norm
 
@@ -235,6 +236,57 @@ def test_pure_opd_actor_neutralizes_masked_nan_outside_loss_helper(monkeypatch):
         "actor/grad_norm",
     ):
         assert all(math.isfinite(value) for value in metrics[name])
+
+
+def test_joint_actor_gradient_and_update_equal_weighted_rl_and_opd_branches(monkeypatch):
+    monkeypatch.setattr(dp_actor_module, "get_device_id", lambda: "cpu")
+    rl_actor = make_fake_actor(DistillationConfig(enabled=True, rl_coef=1.0, coef=0.0))
+    opd_actor = make_fake_actor(DistillationConfig(enabled=True, rl_coef=0.0, coef=1.0))
+    joint_actor = make_fake_actor(DistillationConfig(enabled=True, rl_coef=1.0, coef=0.3))
+    old = torch.zeros((2, 2))
+    # RL pushes sampled-token log-probability up while OPD pushes it down.
+    data = actor_batch(torch.ones_like(old), old, teacher_log_probs=torch.full_like(old, -0.5))
+
+    initial = joint_actor.actor_module.sampled_log_prob.detach().clone()
+    rl_actor.update_policy(data)
+    opd_actor.update_policy(data)
+    joint_metrics = joint_actor.update_policy(data)
+
+    expected_gradient = rl_actor.last_parameter_grad + 0.3 * opd_actor.last_parameter_grad
+    torch.testing.assert_close(joint_actor.last_parameter_grad, expected_gradient)
+    expected_update = (
+        rl_actor.actor_module.sampled_log_prob.detach()
+        + 0.3 * opd_actor.actor_module.sampled_log_prob.detach()
+        - 0.3 * initial
+    )
+    torch.testing.assert_close(joint_actor.actor_module.sampled_log_prob.detach(), expected_update)
+
+    assert torch.all(rl_actor.last_parameter_grad < 0)
+    assert torch.all(opd_actor.last_parameter_grad > 0)
+    assert torch.all(joint_actor.last_parameter_grad < 0)
+    assert all(value == pytest.approx(1.0) for value in joint_metrics["actor/rl_coef"])
+    assert all(value == pytest.approx(0.3) for value in joint_metrics["actor/opd_coef"])
+    assert all(value > 0 for value in joint_metrics["actor/rl_logprob_grad_norm"])
+    assert all(value > 0 for value in joint_metrics["actor/opd_logprob_grad_norm"])
+
+
+def test_joint_actor_retains_opd_update_when_grpo_advantage_is_saturated(monkeypatch):
+    monkeypatch.setattr(dp_actor_module, "get_device_id", lambda: "cpu")
+    pure_opd_actor = make_fake_actor(DistillationConfig(enabled=True, rl_coef=0.0, coef=1.0))
+    joint_actor = make_fake_actor(DistillationConfig(enabled=True, rl_coef=1.0, coef=0.3))
+    old = torch.zeros((2, 2))
+    data = actor_batch(torch.zeros_like(old), old, teacher_log_probs=torch.full_like(old, 0.4))
+
+    initial = joint_actor.actor_module.sampled_log_prob.detach().clone()
+    pure_opd_actor.update_policy(data)
+    metrics = joint_actor.update_policy(data)
+
+    torch.testing.assert_close(joint_actor.last_parameter_grad, 0.3 * pure_opd_actor.last_parameter_grad)
+    expected_update = initial + 0.3 * (pure_opd_actor.actor_module.sampled_log_prob.detach() - initial)
+    torch.testing.assert_close(joint_actor.actor_module.sampled_log_prob.detach(), expected_update)
+    assert torch.count_nonzero(joint_actor.actor_module.sampled_log_prob.detach() - initial) > 0
+    assert all(value == pytest.approx(0.0) for value in metrics["actor/rl_logprob_grad_norm"])
+    assert all(value > 0 for value in metrics["actor/opd_logprob_grad_norm"])
 
 
 def test_distillation_coefficients_must_be_finite_and_nonnegative():

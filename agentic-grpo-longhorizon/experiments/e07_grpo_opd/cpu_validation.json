@@ -1,0 +1,20 @@
+{
+  "state": "CPU_PASSED_GPU_NOT_TESTED",
+  "job_id": "166814",
+  "elapsed": "00:00:52",
+  "test_batches_passed": [
+    95,
+    34
+  ],
+  "total_tests_passed": 129,
+  "configs": [
+    "qwen3_opd",
+    "qwen3_grpo_opd"
+  ],
+  "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e07_grpo_opd/source-v1",
+  "source_manifest_sha256": "6677b04ad87140107ebad274b7480bb6d8072b8c4398b0efe95c93ddc92c55cd",
+  "gpu_tests_run": false,
+  "gpu_jobs_submitted": false,
+  "mimo_calls": 0,
+  "checked_at_utc": "2026-09-22T17:32:23.781274+00:00"
+}
