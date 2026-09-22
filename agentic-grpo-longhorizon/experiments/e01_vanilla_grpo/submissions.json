@@ -102,7 +102,7 @@
     "checkpoint_archive_root": "/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/checkpoints/e01_vanilla_grpo/mimo-fix-smoke-v1",
     "entry": "scripts/train/grpo/run_qwen3.sh",
     "dependency": null,
-    "state": "SUBMITTED",
+    "state": "COMPLETED; 1 step, 32 trajectories, accepted=true; full checkpoint archived on HDD",
     "cpu_check_job": "164674"
   },
   "formal_retry": {
@@ -112,12 +112,54 @@
     "checkpoint_archive_root": "/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/checkpoints/e01_vanilla_grpo/formal-seed42-200-v2",
     "entry": "scripts/train/grpo/run_qwen3_formal.sh",
     "dependency": "164680",
-    "state": "SUBMITTED",
+    "state": "FAILED at step4 after 3 updates: MiMo content_filter classified as immediately fatal; no checkpoint",
     "steps": 200,
     "save_freq": 50,
     "eval_freq": 100,
     "token_budget": 32768,
     "seed": 42,
-    "resume_from": null
+    "resume_from": null,
+    "failure": {
+      "task_id": 8,
+      "trajectory_id": "a1e9d0f8a7ba45d0b2209fe0b9a33e81",
+      "policy_turn": 11,
+      "api_status": 200,
+      "finish_reason": "content_filter",
+      "attempt": 1,
+      "elapsed": "00:27:57"
+    }
+  },
+  "filter_fix_check": {
+    "job_id": "165404",
+    "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/source-formal-v4",
+    "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/filter-fix-check-v1",
+    "state": "COMPLETED; 43 tests passed; CONFIG_AND_TOKENIZER_OK; FORMAL_INPUTS_OK (7040 trajectories)",
+    "reused_gpu_smoke_job": "164680",
+    "changed_runtime_files": [
+      "agentic-grpo-longhorizon/src/envs/mimo_client.py",
+      "agentic-grpo-longhorizon/src/envs/tests/test_mimo_client.py"
+    ],
+    "snapshot_note": "Two inert .py.orig editor backups are also preserved in this immutable snapshot; not imported or executed."
+  },
+  "formal_filter_retry": {
+    "job_id": "165407",
+    "cpu_check_job": "165404",
+    "reused_gpu_smoke_job": "164680",
+    "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/source-formal-v4",
+    "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/formal-seed42-200-v3",
+    "checkpoint_archive_root": "/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/checkpoints/e01_vanilla_grpo/formal-seed42-200-v3",
+    "entry": "scripts/train/grpo/run_qwen3_formal.sh",
+    "dependency": null,
+    "state": "SUBMITTED; verified PENDING (Priority) at 2026-09-22 05:03 UTC",
+    "steps": 200,
+    "save_freq": 50,
+    "eval_freq": 100,
+    "eval_split": "train",
+    "eval_samples_per_task": 8,
+    "token_budget": 32768,
+    "seed": 42,
+    "resume_from": null,
+    "time_limit": "36:00:00",
+    "node": "gpu-pro6000-11"
   }
 }

@@ -1,6 +1,7 @@
 """Exercise missing accounting, malformed replies and bounded simulator retries."""
 
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -34,7 +35,7 @@ def client_for(tmp_path, monkeypatch, responses):
     calls = []
 
     def create(**kwargs):
-        calls.append(kwargs)
+        calls.append(deepcopy(kwargs))
         response = responses[len(calls) - 1]
         if isinstance(response, Exception):
             raise response
@@ -79,9 +80,13 @@ def test_invalid_response_retries_same_messages_once(tmp_path, monkeypatch, bad)
         "missing_choices": SimpleNamespace(choices=[], usage=None),
     }[bad]
     client, calls, path = client_for(tmp_path, monkeypatch, [malformed, reply()])
-    messages = [{"role": "user", "content": "Please help."}]
+    initial_messages = [{"role": "user", "content": "Please help."}]
+    messages = deepcopy(initial_messages)
     assert client.complete(messages, "trajectory")[0] == "Please cancel it."
-    assert len(calls) == 2 and calls[0]["messages"] is calls[1]["messages"] is messages
+    assert len(calls) == 2
+    assert calls[0]["messages"] == initial_messages
+    assert calls[1]["messages"] == initial_messages
+    assert messages == initial_messages
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     assert rows[0]["retry"] and not rows[0]["success"] and rows[0]["error_reason"]
     assert rows[1]["success"] and not client.fatal.is_set()
@@ -97,20 +102,53 @@ def test_persistent_invalid_response_aborts_after_four_attempts(tmp_path, monkey
     assert not any(r["success"] for r in rows)
 
 
-def test_content_filter_not_retried_or_treated_as_missing_usage(tmp_path, monkeypatch):
+def test_content_filter_retries_same_messages_and_appends_only_valid_text(
+    tmp_path, monkeypatch
+):
     client, calls, path = client_for(
         tmp_path,
         monkeypatch,
-        [reply(content=None, finish="content_filter", usage=False)],
+        [
+            reply(
+                content="filtered partial text", finish="content_filter", usage=False
+            ),
+            reply(content="Valid user reply."),
+        ],
     )
-    with pytest.raises(UserSimulatorAPIError):
+    initial_messages = [{"role": "user", "content": "Please help."}]
+    user = MimoUserSimulationEnv(client, "trajectory")
+    user.messages = deepcopy(initial_messages)
+
+    assert user.generate_next_message(user.messages) == "Valid user reply."
+    assert user.messages == [
+        *initial_messages,
+        {"role": "assistant", "content": "Valid user reply."},
+    ]
+    assert calls[0]["messages"] == initial_messages
+    assert calls[1]["messages"] == initial_messages
+    assert not client.fatal.is_set()
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert rows[0]["retry"] and not rows[0]["success"]
+    assert rows[0]["finish_reason"] == rows[0]["error_reason"] == "content_filter"
+    assert rows[1]["success"] and rows[1]["finish_reason"] == "stop"
+    assert "filtered partial text" not in path.read_text()
+
+
+def test_persistent_content_filter_aborts_after_four_attempts(tmp_path, monkeypatch):
+    client, calls, path = client_for(
+        tmp_path,
+        monkeypatch,
+        [reply(content="filtered partial text", finish="content_filter", usage=False)]
+        * 4,
+    )
+    with pytest.raises(UserSimulatorAPIError, match="reason=content_filter"):
         client.complete([], "trajectory")
-    row = json.loads(path.read_text())
-    assert (
-        len(calls) == 1
-        and not row["retry"]
-        and row["finish_reason"] == "content_filter"
-    )
+    assert len(calls) == 4 and client.fatal.is_set()
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [row["retry"] for row in rows] == [True, True, True, False]
+    assert not any(row["success"] for row in rows)
+    assert all(row["error_reason"] == "content_filter" for row in rows)
+    assert "filtered partial text" not in path.read_text()
 
 
 @pytest.mark.parametrize("status,expected_calls", [(429, 2), (503, 2), (401, 1)])

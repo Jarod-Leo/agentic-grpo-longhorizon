@@ -170,3 +170,15 @@ Slurm：单PRO6000、gpu-pro6000-11（已验证模型可访问）、36小时上�
 ## MiMo失败修复及恢复checkpoint频率
 
 详见 `e01_mimo_failure_analysis.md`。MiMo允许usage=null；有效回复仍使用原文本，费用标为未知。异常回复增加有限重试和安全结构化诊断。正式配置更新为200步、checkpoint每50步、评测每100步，预期训练6400+评测640=7040条轨迹不变。HDD保留50/100/150/200完整checkpoint；新正式训练必须从基础模型开始，不能声称恢复原第74步。
+
+
+## 2026-09-22：content_filter有限重试修复
+
+真实GPU验证164680成功，但正式作业164681在第4步、task 8的MiMo用户回复上收到content_filter，旧客户端一次即终止，已完成3步且没有checkpoint。客户端复用现有4次尝试和退避机制处理此结束原因，只有有效stop回复进入对话；持续过滤仍明确失败，过滤记录全部保留。原因证据、科学口径与验收细节见[e01_mimo_failure_analysis.md](e01_mimo_failure_analysis.md)。
+
+本次仅修改客户端和对应回归测试，共用Slurm壳、训练框架、模型、奖励、数据划分及GPU参数不变。重新执行CPU故障注入与完整配置检查，复用164680已通过的GPU smoke，冻结source-formal-v4后重提formal-seed42-200-v3。正式训练继续200步、每50步保存完整checkpoint到HDD、每100步评测train；因失败前无正式checkpoint，从基础模型开始。
+
+
+本次验收结果：CPU作业 **165404** 成功，43 tests passed，配置/tokenizer与7040条轨迹检查通过；两处改动的Ruff check和format检查通过。正式重跑 **165407** 已提交，单PRO6000、36小时上限，使用source-formal-v4及formal-seed42-200-v3；提交后首次状态为PENDING (Priority)，不代表训练已经完成。HDD归档目录为 `/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/checkpoints/e01_vanilla_grpo/formal-seed42-200-v3`，预计在50/100/150/200步生成完整checkpoint。
+
+本次实际分工：explorer定位失败轨迹与官方接口语义；worker实现客户端最小修复和两个回归用例；主线程审查、执行Slurm预检、核对资源与归档并重提正式作业。快照中保留了patch工具生成的两个不参与导入执行的`.py.orig`备份；部署副本备份已清理，运行快照保持不可变。

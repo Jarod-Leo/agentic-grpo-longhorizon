@@ -200,10 +200,20 @@ class MimoClient:
                     content = getattr(getattr(choice, "message", None), "content", None)
                     content_chars = len(content) if isinstance(content, str) else None
                     if finish_reason != "stop":
+                        reason = (
+                            "content_filter"
+                            if finish_reason == "content_filter"
+                            else "unexpected_finish_reason"
+                        )
                         raise MimoResponseError(
-                            "unexpected_finish_reason",
+                            reason,
                             retryable=finish_reason
-                            in (None, "length", "repetition_truncation"),
+                            in (
+                                None,
+                                "length",
+                                "repetition_truncation",
+                                "content_filter",
+                            ),
                         )
                     if not isinstance(content, str) or not content.strip():
                         raise MimoResponseError("empty_or_nontext_content")
