@@ -1,0 +1,33 @@
+{
+  "job_id": "167648",
+  "submitted_at_utc": "2026-09-23T04:44:54.113902+00:00",
+  "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/source-formal-v4",
+  "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/test-step200-seed42-v1",
+  "task_entry": "scripts/eval/eval_qwen3.sh",
+  "adapter_path": "/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/checkpoints/e01_vanilla_grpo/formal-seed42-200-v3/global_step_200/actor/lora_adapter",
+  "training_job_id": "165407",
+  "checkpoint_step": 200,
+  "split": "test",
+  "task_ids": [
+    3,
+    10,
+    16,
+    20,
+    23,
+    26,
+    30,
+    36,
+    43,
+    46
+  ],
+  "samples_per_task": 8,
+  "expected_trajectories": 80,
+  "dependency": "afterany:166640",
+  "reason_for_dependency": "Shared MiMo 100 RPM allowance; avoid parallel simulator sampling",
+  "temperature": 0.7,
+  "top_p": 0.9,
+  "seed": 42,
+  "benchmark_protocol": "tau-bench airline custom 40/10 split, MiMo v2.5 simulator",
+  "scoring_base_sha256": "20f77ff9255ecaa7db0fbd0972a81881393f282766992c94d572e442cddb8a39",
+  "source_manifest_sha256": "231491a61fbcbc762ace4a969f14954a3031a641ba187637c11bf459ee5d5a16"
+}
