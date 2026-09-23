@@ -1,0 +1,10 @@
+{"task_id": 3, "split": "test", "n": 8, "c": 0, "success_rate": 0.0, "pass_at_k": {"1": 0.0, "4": 0.0, "8": 0.0}, "pass_all_k": {"1": 0.0, "4": 0.0, "8": 0.0}}
+{"task_id": 10, "split": "test", "n": 8, "c": 0, "success_rate": 0.0, "pass_at_k": {"1": 0.0, "4": 0.0, "8": 0.0}, "pass_all_k": {"1": 0.0, "4": 0.0, "8": 0.0}}
+{"task_id": 16, "split": "test", "n": 8, "c": 2, "success_rate": 0.25, "pass_at_k": {"1": 0.25, "4": 0.7857142857142857, "8": 1.0}, "pass_all_k": {"1": 0.25, "4": 0.0, "8": 0.0}}
+{"task_id": 20, "split": "test", "n": 8, "c": 2, "success_rate": 0.25, "pass_at_k": {"1": 0.25, "4": 0.7857142857142857, "8": 1.0}, "pass_all_k": {"1": 0.25, "4": 0.0, "8": 0.0}}
+{"task_id": 23, "split": "test", "n": 8, "c": 8, "success_rate": 1.0, "pass_at_k": {"1": 1.0, "4": 1.0, "8": 1.0}, "pass_all_k": {"1": 1.0, "4": 1.0, "8": 1.0}}
+{"task_id": 26, "split": "test", "n": 8, "c": 8, "success_rate": 1.0, "pass_at_k": {"1": 1.0, "4": 1.0, "8": 1.0}, "pass_all_k": {"1": 1.0, "4": 1.0, "8": 1.0}}
+{"task_id": 30, "split": "test", "n": 8, "c": 8, "success_rate": 1.0, "pass_at_k": {"1": 1.0, "4": 1.0, "8": 1.0}, "pass_all_k": {"1": 1.0, "4": 1.0, "8": 1.0}}
+{"task_id": 36, "split": "test", "n": 8, "c": 8, "success_rate": 1.0, "pass_at_k": {"1": 1.0, "4": 1.0, "8": 1.0}, "pass_all_k": {"1": 1.0, "4": 1.0, "8": 1.0}}
+{"task_id": 43, "split": "test", "n": 8, "c": 8, "success_rate": 1.0, "pass_at_k": {"1": 1.0, "4": 1.0, "8": 1.0}, "pass_all_k": {"1": 1.0, "4": 1.0, "8": 1.0}}
+{"task_id": 46, "split": "test", "n": 8, "c": 8, "success_rate": 1.0, "pass_at_k": {"1": 1.0, "4": 1.0, "8": 1.0}, "pass_all_k": {"1": 1.0, "4": 1.0, "8": 1.0}}

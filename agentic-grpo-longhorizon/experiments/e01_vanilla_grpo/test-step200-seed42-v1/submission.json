@@ -29,5 +29,11 @@
   "seed": 42,
   "benchmark_protocol": "tau-bench airline custom 40/10 split, MiMo v2.5 simulator",
   "scoring_base_sha256": "20f77ff9255ecaa7db0fbd0972a81881393f282766992c94d572e442cddb8a39",
-  "source_manifest_sha256": "231491a61fbcbc762ace4a969f14954a3031a641ba187637c11bf459ee5d5a16"
+  "source_manifest_sha256": "231491a61fbcbc762ace4a969f14954a3031a641ba187637c11bf459ee5d5a16",
+  "state": "COMPLETED",
+  "exit_code": "0:0",
+  "accepted": true,
+  "actual_result_dir": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/source-formal-v4/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/run-167648/eval",
+  "result_link": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e01_vanilla_grpo/test-step200-seed42-v1/eval",
+  "output_note": "Frozen legacy runtime used its default run-167648 directory; eval symlink exposes actual outputs under the submission directory."
 }

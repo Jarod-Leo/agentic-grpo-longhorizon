@@ -20,3 +20,9 @@
 本次由explorer只读审计官方规则、冻结源码及协议差异，主线程核对Slurm资源并提交评测。没有修改评分函数、任务数据或在跑作业。
 
 来源：[官方成功判定](https://github.com/sierra-research/tau-bench/blob/main/tau_bench/envs/base.py)、[官方指标与用户模拟器说明](https://github.com/sierra-research/tau-bench#leaderboard)。
+
+## 2026-09-23 完成记录
+
+作业167648已COMPLETED/0:0，运行18分48秒，summary.accepted=true，所有检查通过。10个test任务各8次，共52/80成功：pass¹=65.00%，pass⁴=60.00%，pass@4=75.7143%。这是固定第200步模型在本项目留出任务上的评测，未更换checkpoint或更新参数。
+
+旧冻结runtime使用默认输出目录source-formal-v4内的experiments/e01_vanilla_grpo/run-167648/eval；现从提交目录test-step200-seed42-v1/eval建立链接指向实际结果，submission.json保存真实路径。旧文中的输出位置现在可通过该链接访问，没有改动冻结源码。
