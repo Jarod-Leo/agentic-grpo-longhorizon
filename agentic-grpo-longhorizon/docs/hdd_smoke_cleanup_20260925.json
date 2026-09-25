@@ -1,0 +1,19 @@
+{
+  "confirmed_by_user": true,
+  "deleted_at_utc": "2026-09-25T15:06:33.253727+00:00",
+  "targets": [
+    {
+      "path": "/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/checkpoints/e01_vanilla_grpo/mimo-fix-smoke-v1",
+      "allocated_bytes_before": 17097167360
+    },
+    {
+      "path": "/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/checkpoints/e05_prm_lite_lata/smoke-seed42-v1",
+      "allocated_bytes_before": 17097168384
+    }
+  ],
+  "preserved": [
+    "/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/checkpoints/e01_vanilla_grpo/formal-seed42-200-v3",
+    "/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/checkpoints/e05_prm_lite_lata/formal-seed42-200-v1"
+  ],
+  "released_allocated_bytes": 34194335744
+}
