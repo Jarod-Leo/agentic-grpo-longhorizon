@@ -1,0 +1,9 @@
+{
+  "confirmed_by_user": true,
+  "deleted_at_utc": "2026-09-25T15:41:37.351975+00:00",
+  "target": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e06_opd/gpu-smoke-v1/train/checkpoints/global_step_2",
+  "allocated_bytes_before": 17097169920,
+  "storage_tier": "SSD",
+  "hdd_bytes_released": 0,
+  "note": "E06 smoke global_step_2 checkpoint was on SSD; formal E06 starts independently and uses a separate HDD archive. Smoke summary/logs remain."
+}

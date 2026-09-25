@@ -45,3 +45,7 @@ smoke 171249 于15:19:21 UTC 完成，Slurm COMPLETED/0:0，2步训练分别耗�
 原正式作业171250申请36小时，覆盖集群2026-09-26 16:00 至09-27 13:00的维护预约，调度器不给启动；尝试`scontrol update TimeLimit=22:00:00`被作业提交策略拒绝。smoke已结束后，Slurm也不接受新作业对其追加`afterok`依赖；主线程读取summary确认通过后，按相同冻结源码和配置重新提交22小时作业**171290**，并取消从未启动的171250。171290于2026-09-25 15:38:47 UTC在gpu-pro6000-11启动，输出与HDD归档放`formal-seed42-200-v2/`，以免覆盖前次提交记录。新的调度时限至2026-09-26 13:38:47 UTC，早于维护2小时21分。
 
 纯训练200×271.316秒约15.1小时；正式运行还包括启动、两次40×8评测、四次checkpoint归档。22小时是调度时限而非实际完成保证。
+
+## Smoke checkpoint 清理
+
+2026-09-25 用户要求清理刚完成的 smoke checkpoint。`gpu-smoke-v1/train/checkpoints/global_step_2/` 实际位于 SSD，单独占用 17,097,169,920 bytes；已精确删除，保留 smoke 的 summary、日志和正式运行。HDD 没有 smoke checkpoint，本次 HDD 释放量为 0。清理前的完整性验收记录仍在 `gpu-smoke-v1/train/summary.json`，但该 smoke checkpoint 此后不可用于恢复。见 [清理记录](e06_smoke_checkpoint_cleanup_20260925.json)。
