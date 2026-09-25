@@ -1,0 +1,15 @@
+{
+  "audit_accepted": true,
+  "audit_sha256": "a0a5000cb670c44fa4e3387a94e18197b88aaa23725c4895eb034fa5f7269a27",
+  "entity": "carrortsky-nanyang-technological-university-singapore",
+  "failed_checks": [],
+  "metrics_sha256": "103f3ec0b77b7f481ceea7b919074d0a6a128d911139439b7f66907d922f4169",
+  "name": "E01-GRPO-seed42-200",
+  "project": "Agentic-longhorizon",
+  "row_count": 200,
+  "run_id": "68bf76aeddf35272",
+  "test_summary_included": true,
+  "upload_completed": true,
+  "uploaded_at": "2026-09-25T10:00:57.408502+00:00",
+  "url": "https://wandb.ai/carrortsky-nanyang-technological-university-singapore/Agentic-longhorizon/runs/68bf76aeddf35272"
+}

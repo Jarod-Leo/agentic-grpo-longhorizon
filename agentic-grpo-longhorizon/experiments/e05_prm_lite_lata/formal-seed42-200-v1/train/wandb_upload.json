@@ -1,0 +1,17 @@
+{
+  "audit_accepted": false,
+  "audit_sha256": "06bb9195c573281995750a3d0b7844d1494ec8292e26196b267259d623dbd24f",
+  "entity": "carrortsky-nanyang-technological-university-singapore",
+  "failed_checks": [
+    "thinking_disabled"
+  ],
+  "metrics_sha256": "18da6da83ddbedf0f0a80d8c47f3a279b781f018d8cc83e971cd2191921ff2c2",
+  "name": "E05-PRM-Lite-LATA-seed42-200",
+  "project": "Agentic-longhorizon",
+  "row_count": 200,
+  "run_id": "6b166e6f09e31a00",
+  "test_summary_included": false,
+  "upload_completed": true,
+  "uploaded_at": "2026-09-25T10:01:20.951148+00:00",
+  "url": "https://wandb.ai/carrortsky-nanyang-technological-university-singapore/Agentic-longhorizon/runs/6b166e6f09e31a00"
+}
