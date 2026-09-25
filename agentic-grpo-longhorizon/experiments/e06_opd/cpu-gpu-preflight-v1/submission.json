@@ -1,0 +1,13 @@
+{
+  "job_id": "171248",
+  "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e06_opd/source-gpu-v1",
+  "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e06_opd/cpu-gpu-preflight-v1",
+  "submitted_at_utc": "2026-09-25T14:49:21.437019+00:00",
+  "settings": {
+    "TASK_ENTRY": "scripts/train/grpo/check_distillation.sh"
+  },
+  "sbatch_options": [
+    "--job-name=e06-cpu"
+  ],
+  "state": "SUBMITTED"
+}

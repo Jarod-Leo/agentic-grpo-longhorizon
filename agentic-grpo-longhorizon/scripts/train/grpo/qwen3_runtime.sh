@@ -37,7 +37,14 @@ setup_qwen3_run() {
     export VLLM_USE_V1=1 VLLM_WORKER_MULTIPROC_METHOD=spawn VLLM_LOGGING_LEVEL=INFO
     export TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 HF_HUB_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1
     export OPENAI_API_KEY=local-unused DS_SKIP_TRITON=1 RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0 RAY_DEDUP_LOGS=0
-    export HYDRA_FULL_ERROR=1 WANDB_MODE=disabled SWANLAB_MODE=disabled
+    export HYDRA_FULL_ERROR=1
+    export WANDB_MODE=${WANDB_MODE:-disabled}
+    export SWANLAB_MODE=${SWANLAB_MODE:-disabled}
+    if [ "$WANDB_MODE" = online ]; then
+        : "${WANDB_API_KEY:?Set WANDB_API_KEY for online logging}"
+        : "${WANDB_PROJECT:?Set WANDB_PROJECT for online logging}"
+        : "${WANDB_ENTITY:?Set WANDB_ENTITY for online logging}"
+    fi
     export MIMO_METRICS_PATH=$RUN_DIR/api.jsonl MIMO_TRAJECTORY_PATH=$RUN_DIR/trajectories.jsonl
     export TOOL_AUDIT_PATH=$RUN_DIR/tool_audit.jsonl TRAJECTORIES_PATH=$RUN_DIR/eval_trajectories.jsonl
     export VERL_FILE_LOGGER_PATH=$RUN_DIR/metrics.jsonl
@@ -57,6 +64,9 @@ setup_qwen3_run() {
     prepare+=(--save-freq "${SAVE_FREQ:-1}" --eval-freq "${EVAL_FREQ:--1}" --eval-samples "${EVAL_SAMPLES:-8}"
         --checkpoint-root "$CHECKPOINT_ROOT")
     QWEN3_OVERRIDES=()
+    if [ "$WANDB_MODE" = online ]; then
+        QWEN3_OVERRIDES+=("trainer.logger=[console,file,wandb]" "trainer.project_name=$WANDB_PROJECT")
+    fi
     if [ -n "${RESUME_FROM:-}" ]; then
         prepare+=(--resume "$RESUME_FROM")
         QWEN3_OVERRIDES+=(trainer.resume_mode=resume_path "trainer.resume_from_path=$RESUME_FROM")

@@ -1,0 +1,16 @@
+{
+  "job_id": "171248",
+  "state": "COMPLETED",
+  "exit_code": "0:0",
+  "elapsed": "00:01:04",
+  "tests_passed": 155,
+  "test_batches": [
+    96,
+    59
+  ],
+  "tokenizer_fingerprint": "6118fc10aafa6154e5d6c6565dc79b6556f99055b36b9b29b053bf4bd9a77e8e",
+  "config": "qwen3_opd",
+  "rl_coef": 0.0,
+  "distillation_coef": 1.0,
+  "gpu_tests_run": false
+}

@@ -6,6 +6,7 @@ export TEACHER_PORT=${TEACHER_PORT:-18932}
 export TEACHER_ENDPOINT=http://127.0.0.1:$TEACHER_PORT
 export TEACHER_MODEL=${TEACHER_MODEL:-/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/models/Qwen/Qwen3-32B}
 export QWEN3_CONFIG=${QWEN3_CONFIG:-qwen3_opd}
+export STUDENT_ENTRY=${STUDENT_ENTRY:-scripts/train/grpo/run_qwen3_formal.sh}
 cd "$REPO"
 if [ "$SLURM_PROCID" = 1 ]; then
     python scripts/train/grpo/serve_token_teacher.py --model-path "$TEACHER_MODEL" \
@@ -22,6 +23,12 @@ if [ "$SLURM_PROCID" = 1 ]; then
     fi
 else
     test "$SLURM_PROCID" = 0
+    if [ -n "${WANDB_ENV_FILE:-}" ]; then
+        test -r "$WANDB_ENV_FILE" || { echo "Cannot read WANDB_ENV_FILE: $WANDB_ENV_FILE" >&2; exit 2; }
+        set -a
+        source "$WANDB_ENV_FILE"
+        set +a
+    fi
     trap 'touch "$RUN_ROOT/student-finished-$SLURM_JOB_ID"' EXIT
     python - <<'PY_WAIT'
 import json, os, time, urllib.request
@@ -38,5 +45,5 @@ for attempt in range(180):
 else:
     raise RuntimeError("Teacher startup timed out")
 PY_WAIT
-    bash scripts/train/grpo/run_qwen3_formal.sh
+    bash "$STUDENT_ENTRY"
 fi

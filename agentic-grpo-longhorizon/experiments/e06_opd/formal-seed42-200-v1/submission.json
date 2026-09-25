@@ -1,0 +1,23 @@
+{
+  "job_id": "171250",
+  "submitted_at_utc": "2026-09-25T14:50:37.509595+00:00",
+  "state": "SUBMITTED",
+  "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e06_opd/source-gpu-v1",
+  "source_manifest_sha256": "db88b4ebbbd2620b7251e37768bae563085788b89142902394ba7edf91f7fd18",
+  "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e06_opd/formal-seed42-200-v1",
+  "config": "qwen3_opd",
+  "steps": 200,
+  "save_freq": 50,
+  "eval_freq": 100,
+  "eval_split": "train",
+  "samples_per_task": 8,
+  "checkpoint_archive_root": "/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/checkpoints/e06_opd/formal-seed42-200-v1",
+  "teacher_model": "/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/models/Qwen/Qwen3-32B",
+  "teacher_revision": "9216db5781bf21249d130ec9da846c4624c16137",
+  "dependency": "afterok:171249",
+  "dependency_gate": "CPU regression then complete 2-step teacher/student smoke with evaluation and checkpoint; summary acceptance is enforced by exit code",
+  "gpu_topology": "one node, two pro6000 GPUs, one srun step, one GPU per rank",
+  "wandb_entity": "carrortsky-nanyang-technological-university-singapore",
+  "wandb_project": "Agentic-longhorizon",
+  "wandb_mode": "online"
+}

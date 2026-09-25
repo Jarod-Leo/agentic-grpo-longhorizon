@@ -1,0 +1,27 @@
+{
+  "job_id": "171249",
+  "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e06_opd/source-gpu-v1",
+  "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e06_opd/gpu-smoke-v1",
+  "submitted_at_utc": "2026-09-25T14:49:21.442264+00:00",
+  "settings": {
+    "QWEN3_CONFIG": "qwen3_opd",
+    "STUDENT_ENTRY": "scripts/train/grpo/run_qwen3.sh",
+    "STEPS": "2",
+    "SAMPLES": "8",
+    "SAVE_FREQ": "2",
+    "EVAL_FREQ": "2",
+    "EVAL_SAMPLES": "1",
+    "EVAL_SPLIT": "train",
+    "CHECKPOINT_ARCHIVE_ROOT": "",
+    "EXP_NAME": "e06_gpu_smoke_v1",
+    "TEACHER_PORT": "18936"
+  },
+  "sbatch_options": [
+    "--job-name=e06-smoke",
+    "--time=02:00:00",
+    "--dependency=afterok:171248",
+    "--kill-on-invalid-dep=yes",
+    "--exclude=gpu-pro6000-2"
+  ],
+  "state": "SUBMITTED"
+}

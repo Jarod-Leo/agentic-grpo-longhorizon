@@ -13,6 +13,9 @@ umask 077
 module purge
 source /projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/setup/activate.sh
 : "${SOURCE_ROOT:?Set immutable source snapshot}" "${RUN_ROOT:?Set output directory}"
+if [ -n "${WANDB_ENV_FILE:-}" ]; then
+    test -r "$WANDB_ENV_FILE" || { echo "Cannot read WANDB_ENV_FILE: $WANDB_ENV_FILE" >&2; exit 2; }
+fi
 export REPO=$SOURCE_ROOT/agentic-grpo-longhorizon
 export PYTHONPATH="$SOURCE_ROOT/verl:$SOURCE_ROOT/tau-bench:$REPO:$AGENTRL_ROOT/runs/grpo_probe_20260919/triton-3.3.1${PYTHONPATH:+:$PYTHONPATH}"
 mkdir -p "$RUN_ROOT"
