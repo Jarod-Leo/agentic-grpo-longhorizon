@@ -1,0 +1,12 @@
+{
+  "confirmed_by_user": true,
+  "deleted_at_utc": "2026-09-25T15:16:42.238076+00:00",
+  "target": "/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/models/Qwen/Qwen2.5-72B-Instruct-AWQ",
+  "allocated_bytes_before": 41607460352,
+  "preserved_models": [
+    "Qwen3-8B",
+    "Qwen3-32B",
+    "Qwen2.5-7B-Instruct"
+  ],
+  "note": "Legacy Qwen2.5 scripts/configs and setup/activate.sh may still reference the removed USER_MODEL path. E06 uses Qwen3-32B teacher and Qwen3-8B student."
+}
