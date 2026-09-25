@@ -1,7 +1,7 @@
 {
   "job_id": "171250",
   "submitted_at_utc": "2026-09-25T14:50:37.509595+00:00",
-  "state": "SUBMITTED",
+  "state": "CANCELLED_BEFORE_START",
   "source_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e06_opd/source-gpu-v1",
   "source_manifest_sha256": "db88b4ebbbd2620b7251e37768bae563085788b89142902394ba7edf91f7fd18",
   "run_root": "/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/e06_opd/formal-seed42-200-v1",
@@ -19,5 +19,7 @@
   "gpu_topology": "one node, two pro6000 GPUs, one srun step, one GPU per rank",
   "wandb_entity": "carrortsky-nanyang-technological-university-singapore",
   "wandb_project": "Agentic-longhorizon",
-  "wandb_mode": "online"
+  "wandb_mode": "online",
+  "replaced_by_job_id": "171290",
+  "reason": "Original 36h limit overlapped maintenance reservation; scontrol TimeLimit update rejected; resubmitted as 22h after smoke accepted"
 }
