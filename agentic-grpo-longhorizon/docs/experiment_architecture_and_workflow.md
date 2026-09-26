@@ -1,6 +1,6 @@
 # 长程工具 Agent 实验：架构、算法与执行流程
 
-> 文档整理日期：2026-09-23（UTC）。覆盖当前实际推进的 E00、E01、E05、E06、E07、E11、E12。实现事实以源码和运行快照为准；“已实现”“CPU通过”“GPU训练完成”“结果验收通过”分别记录。
+> 文档整理日期：2026-09-23（UTC）；E06 状态更新至 2026-09-26。覆盖当前实际推进的 E00、E01、E05、E06、E07、E11、E12。实现事实以源码和运行快照为准；“已实现”“CPU通过”“GPU训练完成”“结果验收通过”分别记录。
 >
 > 配套阅读：[τ-bench 数据与评测说明](tau_bench_dataset_and_evaluation.md)。本文件解释实验系统与方法，配套文件解释任务、成功判定和指标。
 
@@ -110,10 +110,10 @@ Slurm壳见[单卡入口](../../cluster_setup/qwen3_shared/run.sbatch)、[外教
 | 训练采样 | temperature1、top_p1、top_k=-1 | 与teacher概率评分分布对齐 |
 | 评测采样 | temperature0.7、top_p0.9、top_k=-1 | 每任务8次，do_sample=true |
 | 去padding / 动态微批 | 开启 / 开启 | 每GPU token预算32768 |
-| actor attention | FlashAttention2 | E01/E05已有GPU执行；蒸馏新增链路仅CPU验证 |
+| actor attention | FlashAttention2 | E01/E05/E06已有GPU执行；E07/E11/E12仅CPU验证 |
 | 损失聚合 | seq-mean-token-mean | 每轨迹有效token平均，再按轨迹平均 |
 | checkpoint / train评测 | 每50步 / 每100步 | 完整checkpoint归档HDD |
-| 正式步数 | 200 | E01/E05已授权实际执行；蒸馏四组当前仅配置默认 |
+| 正式步数 | 200 | E01/E05/E06实际执行；E07/E11/E12当前仅配置默认 |
 
 配置来源：[qwen3_common.yaml](../configs/train/grpo/qwen3_common.yaml)、[qwen3_performance.yaml](../configs/train/grpo/qwen3_performance.yaml)、[qwen3_formal.yaml](../configs/train/grpo/qwen3_formal.yaml)。
 
@@ -238,7 +238,7 @@ $$
 - [distillation_loss.py](../../verl/verl/trainer/ppo/distillation_loss.py)：共用蒸馏loss。
 - trainer的`_score_distillation`在任何actor更新前完成整批评分。
 
-CPU覆盖真实HTTP回环、小型因果模型和tiny Qwen3、位移/mask/梯度/冻结、实际actor更新与系数退化。没有加载8B/32B权重做GPU评分，不能据此声称教师能力、最长输入显存和吞吐已验证。[E06计划](e06_opd_cpu_plan.md)、[E07计划](e07_grpo_opd_cpu_plan.md)。
+CPU覆盖真实HTTP回环、小型因果模型和tiny Qwen3、位移/mask/梯度/冻结、实际actor更新与系数退化。2026-09-26 E06 已完成真实8B/32B双卡200步训练并通过验收；这验证了实际运行链路，但不能证明教师优于学生或蒸馏改善任务成功率。E07仍仅CPU验证。[E06计划](e06_opd_cpu_plan.md)、[E06执行记录](e06_gpu_execution.md)、[E06曲线分析](e06_training_curve_analysis.md)、[E07计划](e07_grpo_opd_cpu_plan.md)。
 
 ## 8. E11与E12：反馈条件自蒸馏
 
@@ -372,7 +372,7 @@ OPD/OPSD共用`actor/opd_*`日志名，实际教师类型看`run.json`中的`dis
 
 ## 13. 执行状态与结果快照
 
-以下状态核对至2026-09-23 05:12 UTC。状态由Slurm与各运行summary交叉确认，不把生成了数值等同于全部验收通过。
+以下原始状态核对至2026-09-23 05:12 UTC，E06更新至2026-09-26正式任务完成。状态由Slurm与各运行summary交叉确认，不把生成了数值等同于全部验收通过。
 
 | 实验 | 执行证据 | 状态 |
 | --- | --- | --- |
@@ -380,10 +380,10 @@ OPD/OPSD共用`actor/opd_*`日志名，实际教师类型看`run.json`中的`dis
 | E01 | 165407；200步，12小时6分17秒 | 正式训练、周期评测与checkpoint验收通过 |
 | E01 test | 167648；固定step200，18分48秒 | 10题×8次，独立test评测完成并验收通过 |
 | E05 | 166640；11小时25分56秒 | 200步与两次评测已生成，但最终验收失败，不能标为完整通过 |
-| E06 | CPU166809，127项通过 | 实现/CPU通过，未做GPU测试或训练 |
-| E07 | CPU166814，129项通过 | 同上 |
-| E11 | CPU166829，153项通过 | 同上 |
-| E12 | CPU166837，155项通过 | 同上 |
+| E06 | CPU166809；GPU smoke171249；正式171290，16小时21分46秒 | 200步、两次train评测、四份HDD checkpoint，验收通过；未做独立test |
+| E07 | CPU166814，129项通过 | 实现/CPU通过，未做GPU测试或训练 |
+| E11 | CPU166829，153项通过 | 实现/CPU通过，未做GPU测试或训练 |
+| E12 | CPU166837，155项通过 | 实现/CPU通过，未做GPU测试或训练 |
 
 E05的`summary.json`唯一失败项为`thinking_disabled=false`，`accepted=false`；checkpoint和评测样本检查为true。末尾另有DataLoader worker被Killed的日志，但仅据此不能断言OOM或把它定为唯一退出原因。本次文档任务只记录证据，没有修改训练或验收逻辑。
 
@@ -395,6 +395,8 @@ E05的`summary.json`唯一失败项为`thinking_disabled=false`，`accepted=fals
 | E01 step200 | test | 52/80 | 65.00% | 60.00% | 75.71% | 固定最终模型，独立留出评测通过 |
 | E05 step100 | train | 177/320 | 55.31% | 33.00% | 76.46% | 原始诊断值，整项验收失败 |
 | E05 step200 | train | 187/320 | 58.44% | 36.79% | 76.61% | 原始诊断值，不能冒称已完整验收 |
+| E06 step100 | train | 31/320 | 9.69% | 1.43% | 24.29% | 正式纯OPD周期评测 |
+| E06 step200 | train | 34/320 | 10.63% | 1.82% | 24.79% | 最终checkpoint；流程验收通过，任务效果低于E00 |
 
 CPU测试数包含共用回归，不能累加当作独立用例总数。原始证据：[E01 summary](../experiments/e01_vanilla_grpo/formal-seed42-200-v3/train/summary.json)、[E05 summary](../experiments/e05_prm_lite_lata/formal-seed42-200-v1/train/summary.json)。[E01 test summary](../experiments/e01_vanilla_grpo/test-step200-seed42-v1/eval/summary.json)。大运行产物仅在集群可访问，GitHub不会包含完整日志或权重。
 
@@ -406,8 +408,8 @@ CPU测试数包含共用回归，不能累加当作独立用例总数。原始�
 2. 分清原τ-bench与τ²/τ³版本；本项目40/10＋MiMo条件下的结果不等于官方全量榜单。
 3. 使用同输入协议的E00 v2做基线；训练过程平均reward、独立train成绩和test成绩分开。
 4. E05的规则奖励与LATA来自原项目，本项目做接入与明确的数值稳定化；不包装为原创算法。
-5. OPD与OPSD是本项目实际接入，但CPU正确性不证明教师更强、GPU可行或任务收益。
-6. E01/E05用户已将训练预算定为200步；蒸馏四组的200步仅为默认配置，当前无GPU执行授权。原80 GPU-hour全矩阵预算需重新核算。
+5. OPD与OPSD是本项目实际接入；E06已验证实际GPU链路，其余蒸馏组仍仅CPU验证。任何一项流程验收都不等于教师更强或任务收益成立。
+6. E01/E05/E06用户已授权并实际运行200步；E07/E11/E12的200步仍为默认配置。原80 GPU-hour全矩阵预算需重新核算，双GPU任务应按两张卡累计GPU小时。
 7. 不根据test结果换checkpoint、改系数或筛掉失败任务；如另做探索，应另记实验和测试曝光。
 8. 训练/评测运行中的源码快照不改动；修复后建立新快照与输出目录，保存失败历史。checkpoint保留和删除遵守已批准范围。
 

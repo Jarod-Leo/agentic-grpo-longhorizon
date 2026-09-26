@@ -2,6 +2,8 @@
 
 2026-09-25 用户授权执行 E06，原“仅 CPU”阶段限制在本次执行中解除。
 
+**最终状态（2026-09-26）：** 正式作业171290已完成200步，Slurm `COMPLETED/0:0`，耗时16小时21分46秒；`formal-seed42-200-v2/train/summary.json` 的 `accepted=true`。step100/200在train40×8上的成功率分别为9.6875%和10.625%，独立test尚未执行。step50/100/150/200完整checkpoint及adapter均已核对归档HDD。曲线与局限见[训练分析](e06_training_curve_analysis.md)。下文保留原提交历史。
+
 ## 冻结方案
 
 - 学生：原始 Qwen3-8B＋LoRA，seed42；4 个任务×8 条轨迹/步；动态微批32768 tokens。
@@ -49,3 +51,9 @@ smoke 171249 于15:19:21 UTC 完成，Slurm COMPLETED/0:0，2步训练分别耗�
 ## Smoke checkpoint 清理
 
 2026-09-25 用户要求清理刚完成的 smoke checkpoint。`gpu-smoke-v1/train/checkpoints/global_step_2/` 实际位于 SSD，单独占用 17,097,169,920 bytes；已精确删除，保留 smoke 的 summary、日志和正式运行。HDD 没有 smoke checkpoint，本次 HDD 释放量为 0。清理前的完整性验收记录仍在 `gpu-smoke-v1/train/summary.json`，但该 smoke checkpoint 此后不可用于恢复。见 [清理记录](e06_smoke_checkpoint_cleanup_20260925.json)。
+
+## 正式完成与资源口径
+
+171290于2026-09-26 08:00:33 UTC结束。共6400条训练轨迹和两次各320条评测轨迹，合计7040条，全部通过现有协议、样本、API、数值与checkpoint检查。非空thinking事件为0。每50步归档的完整checkpoint全部位于 `/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/checkpoints/e06_opd/formal-seed42-200-v2/`。
+
+Slurm分配持续16.3628小时、两张Pro6000，总分配GPU时间约32.73 GPU-hours。现有summary字段 `gpu_hours=16.2947` 实际计算的是训练入口起止墙钟小时，未乘GPU数量且不含部分外层启动时间，不能直接用于双卡资源成本比较；此处保留原始结果，明确换算口径。
