@@ -12,7 +12,11 @@
 set -eo pipefail
 umask 077
 module purge
+REQUESTED_POLICY_MODEL=${POLICY_MODEL:-}
 source /projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/setup/activate.sh
+if [ -n "$REQUESTED_POLICY_MODEL" ]; then
+    export POLICY_MODEL=$REQUESTED_POLICY_MODEL
+fi
 : "${SOURCE_ROOT:?Set immutable source snapshot}" "${RUN_ROOT:?Set output directory}" "${TASK_ENTRY:?Set main-project script}"
 export REPO=$SOURCE_ROOT/agentic-grpo-longhorizon
 export PYTHONPATH="$SOURCE_ROOT/verl:$SOURCE_ROOT/tau-bench:$REPO:$AGENTRL_ROOT/runs/grpo_probe_20260919/triton-3.3.1${PYTHONPATH:+:$PYTHONPATH}"
@@ -20,4 +24,4 @@ mkdir -p "$RUN_ROOT"
 scontrol show job "$SLURM_JOB_ID" > "$RUN_ROOT/allocation.txt"
 srun --ntasks=1 --gpus-per-task=1 --gpu-bind=single:1 --kill-on-bad-exit=1 \
     --output="$RUN_ROOT/rank-0.out" --error="$RUN_ROOT/rank-0.err" \
-    bash "$REPO/$TASK_ENTRY"
+    bash "$REPO/$TASK_ENTRY" "$@"
