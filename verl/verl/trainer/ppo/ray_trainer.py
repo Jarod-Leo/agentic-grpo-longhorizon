@@ -763,6 +763,27 @@ class RayPPOTrainer:
         1. Ray resource pools from configuration
         2. Worker groups for each role (actor, critic, etc.)
         """
+        if self.config.trainer.get("val_standalone", False):
+            if not self.config.trainer.val_only or not self.config.trainer.val_before_train:
+                raise ValueError("val_standalone requires val_only and val_before_train")
+            if self.config.trainer.resume_mode != "disable":
+                raise ValueError("val_standalone requires resume_mode=disable")
+            if self.config.actor_rollout_ref.rollout.mode != "async":
+                raise ValueError("val_standalone requires async rollout")
+            model_config = self.config.actor_rollout_ref.model
+            if model_config.get("lora_rank", 0) > 0 or model_config.get("lora_adapter_path") is not None:
+                raise ValueError("val_standalone supports raw models without LoRA adapters")
+            if self.use_critic or self.use_reference_policy or self.use_rm or self.config.reward_model.enable:
+                raise ValueError("val_standalone requires rule-based rewards without critic or reference workers")
+            if self.val_reward_fn is None:
+                raise ValueError("val_standalone requires val_reward_fn")
+            from verl.experimental.agent_loop import AgentLoopManager
+
+            self.rm_wg = None
+            self.async_rollout_mode = True
+            self.async_rollout_manager = AgentLoopManager(config=self.config)
+            return
+
         self.resource_pool_manager.create_resource_pool()
 
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
@@ -933,7 +954,8 @@ class RayPPOTrainer:
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
             # NOTE: while there is no checkpoint to load, we still need to offload the model and optimizer to CPU
-            self.actor_rollout_wg.load_checkpoint(None)
+            if not self.config.trainer.get("val_standalone", False):
+                self.actor_rollout_wg.load_checkpoint(None)
             return 0
 
         # load from hdfs
