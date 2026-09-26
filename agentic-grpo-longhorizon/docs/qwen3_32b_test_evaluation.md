@@ -35,8 +35,8 @@
 | 171798 | 首次正式提交 | `experiments/e06_opd/teacher-qwen3-32b-test-seed42-v1/` | 未启动即取消，避免继承错误模型 |
 | 171801 | hybrid模式的32B短验证 | `experiments/e06_opd/teacher-qwen3-32b-test-smoke-seed42-v2/` | FAILED：FSDP模型占用GPU，vLLM可用显存不足，无轨迹 |
 | 171802 | 第二次正式提交 | `experiments/e06_opd/teacher-qwen3-32b-test-seed42-v2/` | 依赖失败自动取消，未启动 |
-| 171809 | 独立推理，每题1次，10条轨迹 | `experiments/e06_opd/teacher-qwen3-32b-test-smoke-seed42-v3/` | 已提交，待验收 |
-| 171810 | 独立推理，每题8次，80条轨迹 | `experiments/e06_opd/teacher-qwen3-32b-test-seed42-v3/` | `afterok:171809`；依赖失败自动取消 |
+| 171809 | 独立推理，每题1次，10条轨迹 | `experiments/e06_opd/teacher-qwen3-32b-test-smoke-seed42-v3/` | COMPLETED，10/10轨迹，全部验收通过；耗时11分02秒 |
+| 171810 | 独立推理，每题8次，80条轨迹 | `experiments/e06_opd/teacher-qwen3-32b-test-seed42-v3/` | RUNNING，2026-09-26 08:54:26 UTC开始；模型及80条test配置已核对 |
 
 首次启动的`setup/activate.sh`无条件设置8B的`POLICY_MODEL`，覆盖了sbatch继承的32B路径。通过实际模型参数量8.19B和run.json发现后立即取消，模型尚在初始化，未生成任何评测轨迹。修复位于共用Slurm壳，默认8B行为保留，显式指定模型时尊重提交参数；重提使用新输出目录并记录替换关系。
 
@@ -45,6 +45,8 @@
 最小通用扩展位于`RayPPOTrainer.init_workers`：显式启用`trainer.val_standalone`时复用已有`AgentLoopManager(config, worker_group=None)`，跳过训练actor和训练资源池；`_load_checkpoint`在该模式中不访问actor。仍调用同一`fit → _validate`、工具交互、reward、输出与汇总器。仅支持无adapter原始模型的异步val-only、禁止恢复或额外critic/reference/neural reward；默认false不改变训练和checkpoint评测路径。未修改历史冻结源码。
 
 CPU作业171807通过13项测试，包含实际fit的checkpoint-disable/validation-only调用链与原默认路径；Ruff作业171808检查通过。新测试为`verl/tests/trainer/ppo/test_standalone_validation_on_cpu.py`，已加入共享快照清单。Ruff安装在独立工具目录，没有改训练环境。
+
+独立推理短验证171809于2026-09-26 08:54:26 UTC完成，Slurm为COMPLETED/0:0，10/10条轨迹齐全，`eval/summary.json`的`accepted=true`且全部检查通过。权重占用61.0347 GiB；运行中一次显存观测为84077/97887 MiB，约82.1 GiB（非峰值测量）。MiMo请求56/56成功，无重试，无非空thinking。正式作业171810随后自动启动，`eval/run.json`已确认32B原始模型、无adapter、test、每题8次、总80条、seed42、binary reward、无蒸馏。正式指标待完整验收后填写。
 
 短验证只检查加载、显存、交互和协议能否运行，不用其任务分数选择配置。正式报告只使用正式80条轨迹，不能混入短验证样本。每次提交的具体参数与代码身份保存在对应目录的`submission.json`，实际有效配置保存在`eval/run.log`。
 
