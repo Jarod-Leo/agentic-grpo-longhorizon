@@ -36,7 +36,7 @@
 | 171801 | hybrid模式的32B短验证 | `experiments/e06_opd/teacher-qwen3-32b-test-smoke-seed42-v2/` | FAILED：FSDP模型占用GPU，vLLM可用显存不足，无轨迹 |
 | 171802 | 第二次正式提交 | `experiments/e06_opd/teacher-qwen3-32b-test-seed42-v2/` | 依赖失败自动取消，未启动 |
 | 171809 | 独立推理，每题1次，10条轨迹 | `experiments/e06_opd/teacher-qwen3-32b-test-smoke-seed42-v3/` | COMPLETED，10/10轨迹，全部验收通过；耗时11分02秒 |
-| 171810 | 独立推理，每题8次，80条轨迹 | `experiments/e06_opd/teacher-qwen3-32b-test-seed42-v3/` | RUNNING，2026-09-26 08:54:26 UTC开始；模型及80条test配置已核对 |
+| 171810 | 独立推理，每题8次，80条轨迹 | `experiments/e06_opd/teacher-qwen3-32b-test-seed42-v3/` | COMPLETED/0:0，80/80轨迹，验收通过；耗时17分50秒 |
 
 首次启动的`setup/activate.sh`无条件设置8B的`POLICY_MODEL`，覆盖了sbatch继承的32B路径。通过实际模型参数量8.19B和run.json发现后立即取消，模型尚在初始化，未生成任何评测轨迹。修复位于共用Slurm壳，默认8B行为保留，显式指定模型时尊重提交参数；重提使用新输出目录并记录替换关系。
 
@@ -46,12 +46,16 @@
 
 CPU作业171807通过13项测试，包含实际fit的checkpoint-disable/validation-only调用链与原默认路径；Ruff作业171808检查通过。新测试为`verl/tests/trainer/ppo/test_standalone_validation_on_cpu.py`，已加入共享快照清单。Ruff安装在独立工具目录，没有改训练环境。
 
-独立推理短验证171809于2026-09-26 08:54:26 UTC完成，Slurm为COMPLETED/0:0，10/10条轨迹齐全，`eval/summary.json`的`accepted=true`且全部检查通过。权重占用61.0347 GiB；运行中一次显存观测为84077/97887 MiB，约82.1 GiB（非峰值测量）。MiMo请求56/56成功，无重试，无非空thinking。正式作业171810随后自动启动，`eval/run.json`已确认32B原始模型、无adapter、test、每题8次、总80条、seed42、binary reward、无蒸馏。正式指标待完整验收后填写。
+独立推理短验证171809于2026-09-26 08:54:26 UTC完成，Slurm为COMPLETED/0:0，10/10条轨迹齐全，`eval/summary.json`的`accepted=true`且全部检查通过。权重占用61.0347 GiB；运行中一次显存观测为84077/97887 MiB，约82.1 GiB（非峰值测量）。MiMo请求56/56成功，无重试，无非空thinking。正式作业171810随后自动启动，`eval/run.json`已确认32B原始模型、无adapter、test、每题8次、总80条、seed42、binary reward、无蒸馏。正式作业于2026-09-26 09:12:16 UTC完成，80/80条轨迹齐全，`accepted=true`且无验收错误。
 
 短验证只检查加载、显存、交互和协议能否运行，不用其任务分数选择配置。正式报告只使用正式80条轨迹，不能混入短验证样本。每次提交的具体参数与代码身份保存在对应目录的`submission.json`，实际有效配置保存在`eval/run.log`。
 
 ## 对照与结论边界
 
-相同test10×8设置下，E00原始Qwen3-8B为13/80（16.25%），E01 step200为52/80（65.00%）。Qwen3-32B的结果须待作业结束且`eval/summary.json`验收后填写。本次使用test是用户明确要求的模型比较，不据此选择训练超参数或重新选择E06 checkpoint。
+相同test10×8设置下，E00原始Qwen3-8B为13/80（16.25%），E01 step200为52/80（65.00%）。Qwen3-32B正式结果为11/80，pass¹=13.75%，pass⁴=0.142857%，pass@4=37.00%。低于原始8B的16.25%，本次测试不支持“32B教师具有更高任务成功率”的假设；仅10个任务，差异不宜直接解释为显著差异。本次使用test是用户明确要求的模型比较，不据此选择训练超参数或重新选择E06 checkpoint。
 
 本次由explorer审查共享入口、协议和显存路径，worker实现独立推理接入并完成CPU检查，主线程核对资源、模型、成功判定与源码manifest并提交。尚未对训练算法做修改。
+
+## 正式结果验收
+
+正式作业171810：2026-09-26 08:54:26–09:12:16 UTC，耗时17分50秒，单张Pro6000。结果文件为`experiments/e06_opd/teacher-qwen3-32b-test-seed42-v3/eval/summary.json`。80条轨迹中11条成功；62条因assistant轮数上限终止，18条由交互终止。工具执行711次，其中146次返回错误（20.53%）；非空thinking事件为0。达到轮数限制不自动等于失败，成功仍以原始tau-bench判定为准。
