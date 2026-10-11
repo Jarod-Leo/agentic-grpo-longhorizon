@@ -17,12 +17,16 @@ from src.training.skill_bank import (
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    collect = commands.add_parser("collect", help="No model/API calls; retain only accepted train successes")
+    collect = commands.add_parser(
+        "collect", help="No model/API calls; retain only accepted train successes"
+    )
     collect.add_argument("--source-run", type=Path, required=True)
     collect.add_argument("--split", type=Path, required=True)
     collect.add_argument("--output-dir", type=Path, required=True)
     collect.add_argument("--max-traces-per-task", type=int, default=4)
-    extract = commands.add_parser("extract", help="Real MiMo API calls with resumable responses")
+    extract = commands.add_parser(
+        "extract", help="Real MiMo API calls with resumable responses"
+    )
     extract.add_argument("--manifest", type=Path, required=True)
     extract.add_argument("--output", type=Path, required=True)
     extract.add_argument("--tokenizer", required=True)
@@ -30,8 +34,11 @@ def main() -> None:
     if not os.environ.get("SLURM_JOB_ID"):
         parser.error("Run data processing and extraction inside Slurm")
     if args.command == "collect":
-        result = collect_successful_trajectories(args.source_run, args.split, args.output_dir, args.max_traces_per_task)
+        result = collect_successful_trajectories(
+            args.source_run, args.split, args.output_dir, args.max_traces_per_task
+        )
     else:
+        import yaml
         from src.envs.mimo_client import MimoClient
         from transformers import AutoTokenizer
 
@@ -43,12 +50,27 @@ def main() -> None:
                 "user_model": "mimo-v2.5",
                 "rpm": 100,
                 "tpm": 10_000_000,
-                "max_inflight": 1,
+                "max_inflight": 4,
                 "max_completion_tokens": 1024,
                 "response_format": {"type": "json_object"},
             }
         )
-        bank = extract_skill_bank(args.manifest, client, tokenizer, args.output)
+        tool_config = (
+            Path(__file__).resolve().parents[3]
+            / "configs/tool_config/tau_bench_airline_tools.yaml"
+        )
+        allowed_tools = [
+            tool["tool_schema"]["function"]["name"]
+            for tool in yaml.safe_load(tool_config.read_text())["tools"]
+        ]
+        bank = extract_skill_bank(
+            args.manifest,
+            client,
+            tokenizer,
+            args.output,
+            max_workers=4,
+            allowed_tools=allowed_tools,
+        )
         result = {
             "requested_candidates": bank["requested_candidates"],
             "retained_candidates": bank["retained_candidates"],
