@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.request
 from collections.abc import Callable
 from functools import lru_cache
-from numbers import Integral
+from numbers import Integral, Real
 from pathlib import Path
 from typing import Any
 
@@ -139,23 +140,13 @@ def _training_task_ids(split_path: str) -> frozenset[int]:
 
 
 @lru_cache(maxsize=8)
-def _fixed_skill_bank(path: str, digest: str, split_path: str) -> dict[int, dict]:
+def _fixed_skill_bank(path: str, digest: str, split_path: str) -> dict[int, list[dict]]:
     from src.training.skill_bank import load_skill_bank
 
     return load_skill_bank(path, digest, split_path)
 
 
-def score_skill_teacher(
-    batch: Any, config: Any, tokenizer: Any, actor_wg: Any = None
-) -> tuple[torch.Tensor, dict]:
-    """Score the student trajectory after adding an offline skill to teacher history.
-
-    Prefix tokens are encoded independently; sampled history and response IDs
-    are never decoded or tokenized again. Validation and held-out tasks cannot
-    enter this training-only scorer, including the no-skill ablation.
-    """
-    from src.training.skill_bank import render_skill
-
+def _batch_training_task_ids(batch: Any, config: Any) -> list[int]:
     if batch.meta_info.get("validate", False):
         raise ValueError("Skill teacher scorer cannot score validation batches")
     split_path = str(Path(config.split_path).resolve())
@@ -179,25 +170,204 @@ def score_skill_teacher(
             raise ValueError("Task ID differs from interaction_kwargs.task_id")
         task_ids.append(int(task_id))
 
-    use_skills = bool(config.use_skills)
-    bank = (
-        _fixed_skill_bank(
-            str(Path(config.skill_bank_path).resolve()),
-            str(config.skill_bank_sha256),
-            split_path,
+    return task_ids
+
+
+class SkillTeacherState:
+    """Bind pre-rollout task-local selection to rewards and checkpoint state."""
+
+    def __init__(self, config: Any) -> None:
+        from src.training.skill_bank import file_sha256, load_skill_bank
+        from src.training.skill_selector import TaskSkillSelector
+
+        self.config = config
+        self.bank = load_skill_bank(
+            config.skill_bank_path, config.skill_bank_sha256, config.split_path
         )
-        if use_skills
-        else {}
-    )
+        self.selector = TaskSkillSelector(
+            self.bank,
+            bank_sha256=config.skill_bank_sha256,
+            split_sha256=file_sha256(config.split_path),
+            exploration_coef=float(config.ucb_exploration_coef),
+            mode=str(config.skill_selection),
+        )
+        log_path = getattr(config, "selection_log_path", None)
+        if not log_path:
+            if not os.environ.get("RUN_DIR"):
+                raise ValueError(
+                    "Set selection_log_path or RUN_DIR for the skill selection audit"
+                )
+            log_path = str(Path(os.environ["RUN_DIR"]) / "skill_selection.jsonl")
+        self.audit_path = Path(log_path)
+        self.prepared_step: int | None = None
+        self.selected: dict[int, dict | None] = {}
+
+    def prepare(self, batch: Any, step: int) -> None:
+        task_ids = _batch_training_task_ids(batch, self.config)
+        self.selected = self.selector.select(task_ids, step)
+        self.prepared_step = step
+
+    def selected_for(self, task_id: int, step: int) -> dict | None:
+        if step != self.prepared_step or task_id not in self.selected:
+            raise ValueError(
+                "Skill teacher selection was not prepared before this rollout step"
+            )
+        return self.selected[task_id]
+
+    def commit(self, batch: Any, step: int) -> dict:
+        task_ids = _batch_training_task_ids(batch, self.config)
+        if step != self.prepared_step or set(task_ids) != set(self.selected):
+            raise ValueError(
+                "Outcome batch does not match the selected task group and step"
+            )
+        outcomes = batch.non_tensor_batch.get("outcome_reward")
+        if outcomes is None or len(outcomes) != len(task_ids):
+            raise ValueError(
+                "Skill selection requires original per-trajectory outcome_reward"
+            )
+        rewards: dict[int, list[float]] = {}
+        for task_id, outcome in zip(task_ids, outcomes, strict=True):
+            if not isinstance(outcome, Real) or outcome not in (0, 1):
+                raise ValueError("Skill selection outcome_reward must be binary 0 or 1")
+            rewards.setdefault(task_id, []).append(float(outcome))
+        records = self.selector.commit(rewards, step)
+        self.audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.audit_path.open("a") as stream:
+            for record in records:
+                stream.write(
+                    json.dumps(
+                        {
+                            **record,
+                            "global_step": step,
+                            "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+                        },
+                        allow_nan=False,
+                    )
+                    + "\n"
+                )
+        self.prepared_step = None
+        self.selected = {}
+        assigned = [row for row in records if row["skill_id"] is not None]
+        count = len(assigned)
+        prior_scores = [
+            row["score_before"] for row in assigned if row["score_before"] is not None
+        ]
+        return {
+            "distillation/skill_reward_groups": count,
+            "distillation/skill_reward_mean": sum(
+                row["reward_mean"] for row in assigned
+            )
+            / count
+            if count
+            else 0.0,
+            "distillation/skill_selection_count_before": sum(
+                row["count_before"] for row in assigned
+            )
+            / count
+            if count
+            else 0.0,
+            "distillation/skill_selection_count_after": sum(
+                row["count_after"] for row in assigned
+            )
+            / count
+            if count
+            else 0.0,
+            "distillation/skill_selection_score_before": sum(prior_scores)
+            / len(prior_scores)
+            if prior_scores
+            else 0.0,
+            "distillation/skill_selection_reward_before": sum(
+                row["mean_reward_before"] for row in assigned
+            )
+            / count
+            if count
+            else 0.0,
+        }
+
+    def save_checkpoint(self, checkpoint_dir: str | Path, step: int) -> None:
+        state = self.selector.state_dict()
+        if self.selector.last_step != step:
+            raise ValueError("Skill selector state does not match the saved model step")
+        path = Path(checkpoint_dir) / "skill_selector.json"
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "version": "skill-selector-checkpoint-v1",
+                    "global_step": step,
+                    "selector": state,
+                },
+                indent=2,
+                allow_nan=False,
+            )
+            + "\n"
+        )
+        temporary.replace(path)
+
+    def load_checkpoint(self, checkpoint_dir: str | Path, step: int) -> None:
+        state = json.loads((Path(checkpoint_dir) / "skill_selector.json").read_text())
+        if (
+            state.get("version") != "skill-selector-checkpoint-v1"
+            or state.get("global_step") != step
+        ):
+            raise ValueError("Skill selector checkpoint version or model step mismatch")
+        self.selector.load_state_dict(state["selector"])
+        if self.selector.last_step != step:
+            raise ValueError("Skill selector restored step differs from the model step")
+        self.prepared_step = None
+        self.selected = {}
+
+
+def score_skill_teacher(
+    batch: Any,
+    config: Any,
+    tokenizer: Any,
+    actor_wg: Any = None,
+    state_manager: SkillTeacherState | None = None,
+) -> tuple[torch.Tensor, dict]:
+    """Score untouched student tokens with the skill selected before rollout."""
+    from src.training.skill_bank import render_skill
+
+    task_ids = _batch_training_task_ids(batch, config)
+    skills: dict[int, dict | None] = {}
+    if bool(config.use_skills):
+        if (
+            getattr(config, "skill_selection", "first") == "ucb"
+            and state_manager is None
+        ):
+            raise ValueError(
+                "UCB skill scoring requires a pre-rollout state_manager selection"
+            )
+        if state_manager is not None:
+            step = int(batch.meta_info["distillation_policy_version"]) + 1
+            skills = {
+                task_id: state_manager.selected_for(task_id, step)
+                for task_id in set(task_ids)
+            }
+        else:
+            bank = _fixed_skill_bank(
+                str(Path(config.skill_bank_path).resolve()),
+                str(config.skill_bank_sha256),
+                str(Path(config.split_path).resolve()),
+            )
+            for task_id in set(task_ids):
+                candidates = bank.get(task_id, [])
+                if len(candidates) > 1:
+                    raise ValueError(
+                        "Multiple task skills require a pre-rollout state_manager selection"
+                    )
+                skills[task_id] = candidates[0] if candidates else None
     max_prefix = int(config.skill_prefix_max_tokens)
     max_length = int(config.teacher_max_length)
     if not 0 < max_prefix <= 512:
         raise ValueError("skill_prefix_max_tokens must be between 1 and 512")
     prefixes = {}
     for task_id in set(task_ids):
-        if task_id not in bank:
+        if skills.get(task_id) is None:
             continue
-        prefix = tokenizer.encode(render_skill(bank[task_id]), add_special_tokens=False)
+        prefix = tokenizer.encode(
+            render_skill(skills[task_id]), add_special_tokens=False
+        )
         if not prefix or len(prefix) > max_prefix:
             raise ValueError(
                 f"Task {task_id} skill prefix has {len(prefix)} tokens; limit is {max_prefix}"

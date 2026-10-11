@@ -19,6 +19,7 @@ actor_rollout_ref:
 
 distillation:
   scorer: src.training.distillation.score_skill_teacher
+  state_manager: src.training.distillation.SkillTeacherState
   teacher_mode: external
   teacher_model_id: ${oc.env:TEACHER_MODEL_ID,Qwen/Qwen3-8B}
   teacher_model_path: ${oc.env:TEACHER_MODEL,/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/models/Qwen/Qwen3-8B}
@@ -30,6 +31,9 @@ distillation:
   endpoint: ${oc.env:TEACHER_ENDPOINT,http://127.0.0.1:18932}
   timeout_s: 600
   use_skills: true
+  skill_selection: ucb
+  ucb_exploration_coef: 1.4142135623730951
+  selection_log_path: ${oc.env:RUN_DIR}/skill_selection.jsonl
   skill_bank_path: ${oc.env:SKILL_BANK_PATH,""}
   skill_bank_sha256: ${oc.env:SKILL_BANK_SHA256,""}
   split_path: ${oc.env:REPO}/experiments/sft_collect_airline/split.json

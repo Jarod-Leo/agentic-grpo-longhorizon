@@ -1,6 +1,6 @@
 # GRPO + Skill-SD：固定 E01 教师的实验方案与 CPU 实现
 
-更新：2026-10-11。方法配置：`qwen3_grpo_skill_sd`；产物目录：`experiments/grpo_skill_sd/`。
+更新：2026-10-11，多候选 + UCB 修订。方法配置：`qwen3_grpo_skill_sd`；产物目录：`experiments/grpo_skill_sd/`。
 
 本轮范围：完成方案、代码、真实 E01 成功轨迹收集和 CPU 验证。**不提交 GPU 作业，不调用真实 MiMo 提取技能，不声称已完成训练或取得新成功率。** 200 步等参数是后续训练的默认方案，并非本轮启动授权。
 
@@ -34,15 +34,17 @@ CPU 收集作业 **198226** 已完成（0 GPU，退出码 0）：
 | 有成功轨迹的 train 任务 | 37 / 40 |
 | 无成功轨迹的 train 任务 | 2、8、9 |
 | 选作 MiMo 输入的轨迹 | 146 |
-| 预计技能提取请求 | 37，每个覆盖任务一次 |
+| 预计技能提取请求 | 146，每条选中成功轨迹一次；同任务保留多个候选 |
 
-保留全部 3551 条成功轨迹；提取输入对每个任务至多选 4 条，按 `(step, trajectory_id)` 排序后取等距位置，覆盖较早和较晚的成功记录。task44 仅有 2 条，全部使用。选择规则不看 test 分数，不额外偏向高频任务。
+保留全部 3551 条成功轨迹；提取输入对每个任务至多选 4 条，按 `(step, trajectory_id)` 排序后取等距位置，覆盖较早和较晚的成功记录。task44 仅有 2 条，全部使用。每条分别交给 MiMo 提取一条候选；其余有数据的 36 个任务各最多 4 个候选。选择规则不看 test 分数，不额外偏向高频任务。
 
 产物在 `experiments/grpo_skill_sd/corpus-e01-seed42-v1/`：
 
 - `successful_train_trajectories.jsonl`：完整成功对话，仅保留必要字段。
 - `extraction_inputs.jsonl`：37 组 MiMo 提取输入，共 146 条轨迹。
 - `manifest.json`：原始文件、split、输入和输出 SHA256，逐任务数量及选择规则。
+
+该 corpus-v1 清单中的 `extraction_requests=37` 记录的是上一版按任务合并提取的请求数。原始清单和快照保留；新版 extractor 复用其中的 146 条轨迹，但逐条提取，技能库 provenance 按实际请求和去重后的候选数记录。新收集清单另标注逐轨迹候选协议，不能拿旧的 37 作为本版 API 请求预算。
 
 关键指纹：
 
@@ -68,11 +70,31 @@ CPU 收集作业 **198226** 已完成（0 GPU，退出码 0）：
 | 提示约束 | 三字段非空、共不超过约 160 英文词；泛化实例 ID、姓名和日期；不编造工具、政策或错误 |
 | 真正硬限制 | 经 Qwen3 tokenizer 编码后的完整技能前缀不超过 512 tokens，超限报错 |
 
-成功轨迹也可能包含可恢复错误；`mistake_analysis` 只能总结实际观察到的错误，没有时明确写无。API 结果满足 JSON/schema/token 限制不代表内容已经正确，需要在正式训练前审阅 37 条技能的政策一致性及是否残留具体答案。
+成功轨迹也可能包含可恢复错误；`mistake_analysis` 只能总结实际观察到的错误，没有时明确写无。API 结果满足 JSON/schema/token 限制不代表内容已经正确，需要在正式训练前审阅生成的每条候选的政策一致性及是否残留具体答案。
 
-每次请求保存模型、提示与输入 hash；通过校验的响应写入 `.responses.jsonl`，失败后可复用相同请求的缓存。技能库写入来源轨迹 ID、split hash、extractor model 和 prompt hash，并用文件 SHA256 固定版本。新实验不在线更新技能库。
+每次请求保存模型、提示与输入 hash；通过校验的响应写入 `.responses.jsonl`，失败后可复用相同请求的缓存。技能库写入来源轨迹 ID、split hash、extractor model 和 prompt hash，并用文件 SHA256 固定版本。新版 `skill-bank-v2` 允许相同 task_id 下有不同 skill_id；同任务内三个字段文字完全相同的候选合并来源轨迹 ID，不把副本当独立候选。实际候选数可能少于 146。历史 v1 单候选文件可读为长度为 1 的候选列表。新实验不在线生成新技能，但选择次数和关联奖励在训练中更新。
 
 凭据由现有 `setup/activate.sh` 加载 `~/.config/cabinagentrl/mimo.env`；任何文档、运行元数据和 Git 提交都不保存 API key。提取与后续用户模拟器共享同一额度，后续不得把同一 key 当作两份独占额度。
+
+### 3.1 每个任务内部的 UCB 选择
+
+本版按 [论文 §3.2 的式 8](https://arxiv.org/pdf/2604.10674) 为同一个任务的多个候选维护独立统计。先按 task_id 定位候选集合，再选一条供教师使用；不跨任务检索。对任务 $x$ 的候选 $e$：
+
+$$
+\mathrm{UCB}_x(e)=\bar r_x(e)+\sqrt{2}\sqrt{\frac{\ln N_x}{n_x(e)}},\qquad N_x=\sum_{e\in B_x}n_x(e).
+$$
+
+尚未选用过的候选优先，多个未试候选和相同分数按技能库的稳定顺序打破并列。计数从 0 开始，不把旧 E01 成功轨迹的 reward=1 当成新学生训练期间的使用反馈。每次采样前先锁定本步所有任务的候选，当前批次的奖励不能参与本次选择。相同任务的全部 8 条 rollout 共用一条 skill；批次内任务即使重复出现，也只选择和计数一次。
+
+**关联奖励的本地明确定义**：本步该任务全部 rollout 的原始二值 `outcome_reward` 的平均值。若 8 条中成功 3 条，关联奖励为 0.375；待该步 actor 更新成功后，所选候选的 $n$ 增加 1、累计奖励加 0.375。计数单位是一次任务组选择，不是 8 次 token/trajectory 评分。禁止使用 GRPO advantage、PRM shaping 或 KL 调整后的 reward 更新 UCB。无候选的任务仍走普通教师，并记录 fallback；不伪造候选统计。
+
+论文定义了 skill 的平均奖励和 UCB 公式，但没有完整规定奖励写回、重试和断点恢复的实现细节。这里的“当前任务组 outcome 均值，成功更新后提交”是公开固定的本地约定。学生当前 rollout 不包含 skill，因此它是**关联反馈，不是技能带来多少成功率提升的因果测量**；学生持续变化也违反经典静态 bandit 的平稳条件。本实验不据此声称 UCB 有经典 regret 保证或必然优于固定选择。
+
+审计文件：`$RUN_DIR/skill_selection.jsonl`。每步每任务记录 skill_id、选择前的次数/平均奖励/UCB 分数、原始 outcome 数量及均值、更新后的次数和累计奖励，附 step/Job ID；未试候选用明确标识，不把 Infinity 写入 JSON。
+
+恢复状态：`global_step_N/skill_selector.json`，与该步模型、优化器和 `data.pt` 同目录写入后归档 HDD。恢复核对 step、bank/split SHA256、候选 ID/顺序和选择配置；缺状态或不匹配直接拒绝。日志不是恢复状态，未保存步产生的审计记录也不用于重建计数。保存期间若还有未提交的选择，会拒绝保存，避免恢复到模型和 selector 不同步的状态。
+
+可通过 `distillation.skill_selection=first` 固定选第一个候选作为消融；`distillation.use_skills=false` 关闭技能；蒸馏系数为 0 时不创建或更新 selector。测试/验证路径不选择、不记 UCB 奖励。
 
 ## 4. 完整训练流程
 
@@ -83,12 +105,15 @@ flowchart TD
     D[base Qwen3-8B + 新 LoRA] --> E[普通提示下学生 rollout]
     E --> F[tau-bench 原始 outcome / GRPO]
     E --> G[保留原始 token 和 assistant mask]
-    C --> H[固定 E01 step200 教师 + task skill]
+    C --> U[采样前按任务 UCB 选择一个候选]
+    U --> H[固定 E01 step200 教师 + task skill]
     G --> H
     H --> I[相同学生 token 的 teacher log-prob]
     F --> J[GRPO + lambda Skill-SD 更新学生]
     I --> J
     J --> D
+    J --> K[提交该任务组 outcome 均值和选择次数]
+    K --> U
 ```
 
 教师使用：
@@ -163,7 +188,8 @@ train/test 分开；保留逐任务结果、工具错误、轮数耗尽、assist
 |---|---|---|---|
 | 既有 E01 | 无 | 无 | 纯 GRPO 基线 |
 | 新方法无技能消融 | 固定 E01 step200 | 关闭 | 分离“更好的教师”与“技能”的贡献 |
-| 新方法主实验 | 同一固定 E01 step200 | 训练任务离线技能 | 检验额外技能信息 |
+| 固定候选消融 | 同一固定 E01 step200 | 每任务固定第一条 | 与 UCB 比较选择机制 |
+| 新方法主实验 | 同一固定 E01 step200 | 同任务多候选 + UCB | 检验技能与自适应选择 |
 
 无技能消融复用同一配置并传 `distillation.use_skills=false`，其余损失/预算保持一致；不是拿旧的 32B E07 直接替代这个对照。本轮只实现开关和 CPU 验证，不自动启动这些训练。
 
@@ -177,6 +203,7 @@ train/test 分开；保留逐任务结果、工具错误、轮数耗尽、assist
 |---|---|
 | 配置 | `configs/train/grpo/qwen3_grpo_skill_sd.yaml` |
 | 数据收集/技能库 | `src/training/skill_bank.py`、`scripts/train/grpo/extract_skill_bank.py` |
+| 候选统计与 UCB | `src/training/skill_selector.py`，按任务维护次数和关联奖励 |
 | 教师 token 对齐与技能注入 | `src/training/distillation.py` |
 | 固定 LoRA 教师/身份 | `src/models/token_teacher.py`、`scripts/train/grpo/serve_token_teacher.py` |
 | loss / actor 分支 | `verl/verl/trainer/ppo/distillation_loss.py`、`verl/verl/workers/actor/dp_actor.py`（仓库根路径） |
@@ -187,9 +214,11 @@ train/test 分开；保留逐任务结果、工具错误、轮数耗尽、assist
 
 核心新增曲线：`actor/skill_sd_loss`、`skill_sd_ell_mean`、`skill_sd_rho_mean`、`skill_sd_k3_mean`、`skill_sd_signal_token_fraction`、`skill_sd_logprob_grad_norm`，以及 `actor/rl_loss`、`rl_logprob_grad_norm`、`actor/grad_norm`。覆盖记录为 `distillation/skill_coverage`、`skill_tokens`、`skill_fallback_trajectories`。
 
+UCB 另外记录 `distillation/skill_reward_groups`、`skill_reward_mean`、`skill_selection_count_before/after`、`skill_selection_score_before`、`skill_selection_reward_before`。这些曲线汇总本步选中候选的统计；count 曲线是所选候选访问次数的平均数，不是全库总次数。score 均值只包含已有历史分数的候选，全未试时曲线用 0 占位，精确的 null/未试状态和逐候选计数以审计 JSONL 与 checkpoint 为准。
+
 新 loss 在一个 minibatch 内正确累加微批贡献，避免把已除过梯度累积次数的 loss 再平均一次。这里单 actor GPU、32 条组成一个 minibatch、单 PPO epoch，指标可以按这一训练步解释；若后续扩展到多个 minibatch/worker，框架会再等权聚合，各 token 统计不能冒称全局 token 加权均值。两个 `logprob_grad_norm` 是系数和微批权重后的 **log-prob 梯度范数**，不是模型参数梯度或两个梯度的夹角。
 
-CPU 验证复用 `check_distillation.sh`，包括原 GRPO/PRM/LATA/OPD/OPSD 回归、新损失解析梯度、旧采样分母固定、mask、静态/动态微批一致性、lambda=0、tiny CPU Qwen3+PEFT 恢复 head、mock HTTP 身份/对齐、技能提取缓存与数据隔离、真实 tokenizer/config/adapter 指纹。
+CPU 验证复用 `check_distillation.sh`，包括原 GRPO/PRM/LATA/OPD/OPSD 回归、UCB 先探索/公式/幂等重试/恢复下一选择一致、真实 trainer checkpoint hook 与临时归档目录验证、新损失解析梯度、旧采样分母固定、mask、静态/动态微批一致性、lambda=0、tiny CPU Qwen3+PEFT 恢复 head、mock HTTP 身份/对齐、技能提取缓存与数据隔离、真实 tokenizer/config/adapter 指纹。
 
 ### CPU 执行方式
 
@@ -197,10 +226,10 @@ CPU 验证复用 `check_distillation.sh`，包括原 GRPO/PRM/LATA/OPD/OPSD 回�
 
 ```bash
 python3 agentic-grpo-longhorizon/scripts/train/grpo/snapshot_qwen3_source.py \
-  agentic-grpo-longhorizon/experiments/grpo_skill_sd/source-cpu-v1
+  agentic-grpo-longhorizon/experiments/grpo_skill_sd/source-ucb-cpu-v1
 
-export SOURCE_ROOT="$PWD/agentic-grpo-longhorizon/experiments/grpo_skill_sd/source-cpu-v1"
-export RUN_ROOT="$PWD/agentic-grpo-longhorizon/experiments/grpo_skill_sd/cpu-validation-v1"
+export SOURCE_ROOT="$PWD/agentic-grpo-longhorizon/experiments/grpo_skill_sd/source-ucb-cpu-v1"
+export RUN_ROOT="$PWD/agentic-grpo-longhorizon/experiments/grpo_skill_sd/ucb-cpu-validation-v1"
 export TASK_ENTRY=scripts/train/grpo/check_distillation.sh
 export DISTILLATION_CONFIGS=qwen3_opd,qwen3_grpo_opd,qwen3_opsd,qwen3_grpo_opsd,qwen3_grpo_skill_sd
 export TEACHER_MODEL=/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/models/Qwen/Qwen3-8B
@@ -227,4 +256,12 @@ sbatch --output="$RUN_ROOT/slurm-%j.out" --error="$RUN_ROOT/slurm-%j.err" \
 
 主线程完成方案、数据路径、公共入口集成和验收；explorer 调查并复核代码/数据/论文，两个实现子线程分别完成 loss 和 teacher。项目 worker 配置中的 `gpt-6.1-Sol` 标识启动失败，实际实现改用可用标识 `gpt-6.1-sol` 承担 worker 职责，未修改项目模型配置。
 
-本轮交付完成。后续正式实验仍需真实技能 API 提取/内容审阅和 GPU 验证训练，均不计作本轮已完成成果。
+以上 198233 / 208 项是单候选版本的历史验收记录。多候选 UCB 修订的 CPU 验收结果见下方；历史源码快照和结果保持不变。真实技能 API 提取/内容审阅和 GPU 验证训练仍属于后续阶段。
+
+### 多候选 + UCB 验收
+
+CPU 作业 **198361** 已完成：`COMPLETED / 0:0`，耗时 **1 分 45 秒**，**0 GPU**。共 **241 项通过**：共用回归 98 项，蒸馏/教师/候选/UCB/状态恢复/loss 回归 143 项；五组配置、真实 tokenizer、adapter/base 身份和 `ucb` / `first` / 关闭技能的元信息核对均通过。
+
+验证包括：历史 corpus-v1 逐轨迹提取与缓存恢复、候选去重、UCB 先试未试及公式、每任务组一次计数、失败提交原子性、重复及重排的整组 skill 对齐、原始 outcome 与 shaped reward 隔离、真实 trainer 保存/恢复 hook、临时目录中的归档和 SSD symlink、缺失/错步/错 bank/split/config 状态拒绝、恢复后下一选择一致。实际文件和模型的 GPU 保存恢复仍未运行。
+
+证据目录：`experiments/grpo_skill_sd/ucb-cpu-validation-v1/`；其中 `slurm-198361.out` 为完整输出，`distillation-tests.xml` 为蒸馏测试报告，各 `*-input/run.json` 为配置元信息。汇总：`experiments/grpo_skill_sd/ucb_cpu_validation.json`；冻结源码：`source-ucb-cpu-v1/`。本轮未调用真实 MiMo，未生成正式 skill bank。

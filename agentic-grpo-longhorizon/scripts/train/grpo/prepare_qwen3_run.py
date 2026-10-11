@@ -100,6 +100,15 @@ def main() -> None:
             "covered_train_task_ids": sorted(bank),
             "fallback_train_task_ids": sorted(set(train) - set(bank)),
             "coverage": len(bank) / len(train),
+            "candidate_count": sum(len(candidates) for candidates in bank.values()),
+            "candidates_per_task": {
+                str(t): len(candidates) for t, candidates in bank.items()
+            },
+            "selection": str(teacher_config.get("skill_selection", "first")),
+            "ucb_exploration_coef": float(
+                teacher_config.get("ucb_exploration_coef", 2**0.5)
+            ),
+            "reward_association": "current_train_task_group_mean_binary_outcome",
             "prefix_max_tokens": int(teacher_config.skill_prefix_max_tokens),
         }
     start = 0

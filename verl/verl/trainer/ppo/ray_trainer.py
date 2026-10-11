@@ -343,6 +343,32 @@ class RayPPOTrainer:
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
+    def _get_distillation_state(self):
+        """Instantiate optional state only for active skill distillation."""
+        settings = self.config.actor_rollout_ref.actor.get("distillation", {})
+        config = self.config.get("distillation", {})
+        if (
+            not settings.get("enabled", False)
+            or settings.get("coef", 0.0) == 0
+            or not config.get("use_skills", True)
+            or not config.get("state_manager")
+        ):
+            return None
+        if not hasattr(self, "_distillation_state_manager"):
+            from hydra.utils import get_class
+
+            self._distillation_state_manager = get_class(config.state_manager)(config)
+        return self._distillation_state_manager
+
+    def _prepare_distillation(self, batch: DataProto) -> None:
+        manager = self._get_distillation_state()
+        if manager is not None:
+            manager.prepare(batch, self.global_steps)
+
+    def _commit_distillation(self, batch: DataProto) -> dict:
+        manager = self._get_distillation_state()
+        return manager.commit(batch, self.global_steps) if manager is not None else {}
+
     def _score_distillation(self, batch: DataProto) -> dict:
         """Finish all teacher scoring at a fixed student version before any update."""
         settings = self.config.actor_rollout_ref.actor.get("distillation", {})
@@ -353,12 +379,16 @@ class RayPPOTrainer:
         if self.config.actor_rollout_ref.rollout.temperature != 1.0:
             raise ValueError("Sampled-token distillation requires temperature=1 scoring and rollout")
         batch.meta_info["distillation_policy_version"] = self.global_steps - 1
-        scores, metrics = get_method(self.config.distillation.scorer)(
-            batch=batch,
-            config=self.config.distillation,
-            tokenizer=self.tokenizer,
-            actor_wg=self.actor_rollout_wg,
-        )
+        scorer_kwargs = {
+            "batch": batch,
+            "config": self.config.distillation,
+            "tokenizer": self.tokenizer,
+            "actor_wg": self.actor_rollout_wg,
+        }
+        manager = self._get_distillation_state()
+        if manager is not None:
+            scorer_kwargs["state_manager"] = manager
+        scores, metrics = get_method(self.config.distillation.scorer)(**scorer_kwargs)
         mask = batch.batch["response_mask"].bool()
         if scores.shape != mask.shape or not torch.isfinite(scores).all():
             raise ValueError("Teacher returned misaligned or nonfinite log-probabilities")
@@ -937,6 +967,10 @@ class RayPPOTrainer:
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
 
+        manager = self._get_distillation_state()
+        if manager is not None:
+            manager.save_checkpoint(local_global_step_folder, self.global_steps)
+
         # latest checkpointed iteration tracker (for atomic usage)
         local_latest_checkpointed_iteration = os.path.join(
             self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
@@ -987,6 +1021,12 @@ class RayPPOTrainer:
         print(f"Load from checkpoint folder: {global_step_folder}")
         # set global step
         self.global_steps = int(global_step_folder.split("global_step_")[-1])
+
+        manager = self._get_distillation_state()
+        if manager is not None:
+            manager.load_checkpoint(global_step_folder, self.global_steps)
+            if not os.path.isfile(os.path.join(global_step_folder, "data.pt")):
+                raise ValueError("Stateful distillation resume requires the matching dataloader state")
 
         print(f"Setting global step to {self.global_steps}")
         print(f"Resuming from {global_step_folder}")
@@ -1136,6 +1176,7 @@ class RayPPOTrainer:
                         else curr_step_profile
                     )
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
+                self._prepare_distillation(batch)
 
                 # add uid to batch
                 batch.non_tensor_batch["uid"] = np.array(
@@ -1345,6 +1386,7 @@ class RayPPOTrainer:
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
+                        metrics.update(self._commit_distillation(batch))
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)

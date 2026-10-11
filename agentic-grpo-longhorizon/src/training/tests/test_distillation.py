@@ -9,9 +9,10 @@ import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
-from src.training import distillation
 from verl.protocol import DataProto
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
+
+from src.training import distillation
 
 
 class Tokenizer:

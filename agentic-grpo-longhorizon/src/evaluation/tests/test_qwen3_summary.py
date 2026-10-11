@@ -342,3 +342,51 @@ def test_skill_sd_uses_its_own_loss_keys_and_checks_skill_coverage(tmp_path):
     data["distillation/skill_coverage"] = 1.0
     metrics.write_text(json.dumps({"step": 1, "data": data}) + "\n")
     assert not build_summary(tmp_path)[0]["accepted"]
+
+
+def test_skill_selector_checkpoint_must_match_saved_model_and_bank(tmp_path):
+    write_joint_run(tmp_path)
+    path = tmp_path / "run.json"
+    meta = json.loads(path.read_text())
+    meta.update(checkpoint_steps=[1], split_sha256="split-sha")
+    meta["distillation"] = {
+        "actor": {
+            "enabled": True,
+            "coef": 0.001,
+            "rl_coef": 1.0,
+            "loss_type": "skill_sd",
+        },
+        "teacher": {
+            "state_manager": "src.training.distillation.SkillTeacherState",
+            "use_skills": True,
+            "skill_bank_sha256": "bank-sha",
+            "skill_selection": "ucb",
+            "ucb_exploration_coef": 2**0.5,
+        },
+    }
+    path.write_text(json.dumps(meta))
+    key = "checkpoint_1_skill_selector"
+    assert not build_summary(tmp_path)[0]["checks"][key]
+    checkpoint = tmp_path / "checkpoints/global_step_1"
+    checkpoint.mkdir(parents=True)
+    state = {
+        "version": "skill-selector-checkpoint-v1",
+        "global_step": 1,
+        "selector": {
+            "last_step": 1,
+            "bank_sha256": "bank-sha",
+            "split_sha256": "split-sha",
+            "mode": "ucb",
+            "exploration_coef": 2**0.5,
+        },
+    }
+    file = checkpoint / "skill_selector.json"
+    file.write_text(json.dumps(state))
+    assert build_summary(tmp_path)[0]["checks"][key]
+    state["selector"]["bank_sha256"] = "other-bank"
+    file.write_text(json.dumps(state))
+    assert not build_summary(tmp_path)[0]["checks"][key]
+    state["selector"]["bank_sha256"] = "bank-sha"
+    state["global_step"] = 2
+    file.write_text(json.dumps(state))
+    assert not build_summary(tmp_path)[0]["checks"][key]

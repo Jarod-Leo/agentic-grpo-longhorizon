@@ -5,7 +5,7 @@ cd "$(dirname "$0")/../../.."
 export CUDA_VISIBLE_DEVICES="" OMP_NUM_THREADS=2 TOKENIZERS_PARALLELISM=false
 export DISTILLATION_CONFIGS=${DISTILLATION_CONFIGS:-qwen3_opd}
 source scripts/train/grpo/check_qwen3.sh
-python -m pytest -q --junitxml="$RUN_ROOT/distillation-tests.xml" src/models/tests/test_token_teacher.py src/training/tests/test_distillation.py src/training/tests/test_self_distillation.py src/training/tests/test_skill_bank.py src/envs/tests/test_opsd_feedback.py \
+python -m pytest -q --junitxml="$RUN_ROOT/distillation-tests.xml" src/models/tests/test_token_teacher.py src/training/tests/test_distillation.py src/training/tests/test_self_distillation.py src/training/tests/test_skill_bank.py src/training/tests/test_skill_selector.py src/training/tests/test_skill_training_state.py src/envs/tests/test_opsd_feedback.py \
     ../verl/tests/trainer/ppo/test_distillation_loss_on_cpu.py
 python - "$RUN_ROOT" <<'PY_CHECK'
 import copy
@@ -30,12 +30,12 @@ if "qwen3_grpo_skill_sd" in os.environ.get("DISTILLATION_CONFIGS", ""):
     # Explicit CPU fixture, never a real MiMo skill bank or training artifact.
     fixture = root / "mock-skills-DO-NOT-TRAIN.json"
     fixture.write_text(json.dumps({
-        "version": "skill-bank-v1", "provenance": {"split_sha256": file_sha256(split_path), "extractor_model": "CPU-fixture"},
+        "version": "skill-bank-v2", "provenance": {"split_sha256": file_sha256(split_path), "extractor_model": "CPU-fixture"},
         "train_task_ids": split["seen_task_ids"], "test_task_ids": split["unseen_task_ids"],
-        "skills": [{"task_id": split["seen_task_ids"][0], "skill_id": "cpu-fixture", "source_trajectory_ids": ["fixture"],
-                    "success_analysis": "Check the current reservation before choosing an action.",
+        "skills": [{"task_id": split["seen_task_ids"][0], "skill_id": f"cpu-fixture-{candidate}", "source_trajectory_ids": [f"fixture-{candidate}"],
+                    "success_analysis": f"Candidate {candidate}: check the current reservation before choosing an action.",
                     "mistake_analysis": "Avoid retrying unchanged arguments after a tool error.",
-                    "golden_workflow": "Check policy, clarify the request, obtain confirmation and use the appropriate tool."}],
+                    "golden_workflow": "Check policy, clarify the request, obtain confirmation and use the appropriate tool."} for candidate in range(3)],
     }, indent=2) + "\n")
     os.environ["SKILL_BANK_PATH"] = str(fixture)
     os.environ["SKILL_BANK_SHA256"] = file_sha256(fixture)
@@ -57,6 +57,8 @@ with initialize_config_dir(config_dir=str(Path("configs/train/grpo").resolve()),
             assert "endpoint" not in resolved["distillation"]
         if name == "qwen3_grpo_skill_sd":
             assert actor.distillation.loss_type == "skill_sd"
+            assert resolved["distillation"]["skill_selection"] == "ucb"
+            assert resolved["distillation"]["ucb_exploration_coef"] == 2**0.5
             assert resolved["distillation"]["scorer"] == "src.training.distillation.score_skill_teacher"
             assert resolved["actor_rollout_ref"]["model"].get("lora_adapter_path") is None
             assert resolved["trainer"]["resume_mode"] == "disable"
@@ -126,6 +128,9 @@ if [[ ",$DISTILLATION_CONFIGS," == *,qwen3_grpo_skill_sd,* ]]; then
     python scripts/train/grpo/prepare_qwen3_run.py "$RUN_ROOT/skill-ablation-input" --mode train --config-name qwen3_grpo_skill_sd \
         --steps 200 --save-freq 50 --eval-freq 100 --eval-samples 8 --override distillation.use_skills=false \
         --override actor_rollout_ref.actor.distillation.coef=0.0
+    mkdir -p "$RUN_ROOT/skill-first-input"
+    python scripts/train/grpo/prepare_qwen3_run.py "$RUN_ROOT/skill-first-input" --mode train --config-name qwen3_grpo_skill_sd \
+        --steps 200 --save-freq 50 --eval-freq 100 --eval-samples 8 --override distillation.skill_selection=first
     python - "$RUN_ROOT" <<'PY_SKILL'
 import json, sys
 from pathlib import Path
@@ -134,6 +139,10 @@ main = json.loads((root / "qwen3_grpo_skill_sd-input/run.json").read_text())
 ablation = json.loads((root / "skill-ablation-input/run.json").read_text())
 assert main["distillation"]["actor"]["loss_type"] == "skill_sd"
 assert main["distillation"]["skill_bank"]["coverage"] == 1 / 40
+assert main["distillation"]["skill_bank"]["candidate_count"] == 3
+assert main["distillation"]["skill_bank"]["selection"] == "ucb"
+first = json.loads((root / "skill-first-input/run.json").read_text())
+assert first["distillation"]["skill_bank"]["selection"] == "first"
 assert main["adapter"] is None and main["resume_from"] is None
 assert main["expected_trajectories"] == 7040
 assert ablation["distillation"]["actor"]["coef"] == 0.0

@@ -55,7 +55,9 @@ def main() -> None:
         )
         bank = extract_skill_bank(args.manifest, client, tokenizer, args.output)
         result = {
-            "skills": len(bank["skills"]),
+            "requested_candidates": bank["requested_candidates"],
+            "retained_candidates": bank["retained_candidates"],
+            "covered_tasks": len({skill["task_id"] for skill in bank["skills"]}),
             "bank_path": str(args.output),
             "bank_sha256": file_sha256(args.output),
         }

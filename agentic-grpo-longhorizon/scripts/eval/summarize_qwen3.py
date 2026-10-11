@@ -208,6 +208,28 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
                     "actor/lora_adapter/adapter_model.safetensors",
                 )
             )
+            distillation = meta.get("distillation", {})
+            actor = distillation.get("actor", {})
+            teacher = distillation.get("teacher") or {}
+            if (
+                actor.get("enabled")
+                and actor.get("coef", 0) > 0
+                and teacher.get("use_skills")
+                and teacher.get("state_manager")
+            ):
+                state, err = read_json(checkpoint / "skill_selector.json", {})
+                errors.extend(err)
+                selector = state.get("selector", {})
+                checks[f"checkpoint_{step}_skill_selector"] = (
+                    state.get("version") == "skill-selector-checkpoint-v1"
+                    and state.get("global_step") == step
+                    and selector.get("last_step") == step
+                    and selector.get("bank_sha256") == teacher.get("skill_bank_sha256")
+                    and selector.get("split_sha256") == meta.get("split_sha256")
+                    and selector.get("mode") == teacher.get("skill_selection")
+                    and selector.get("exploration_coef")
+                    == teacher.get("ucb_exploration_coef")
+                )
         reward_groups = defaultdict(list)
         for row in training_rows:
             reward_groups[(row.get("step"), row.get("task_id"))].append(row)
