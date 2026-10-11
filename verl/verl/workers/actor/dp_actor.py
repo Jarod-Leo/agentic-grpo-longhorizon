@@ -28,7 +28,11 @@ from torch.distributed.tensor import DTensor
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
-from verl.trainer.ppo.distillation_loss import compute_sampled_token_opd_loss, logprob_branch_grad_norm
+from verl.trainer.ppo.distillation_loss import (
+    compute_sampled_token_opd_loss,
+    compute_skill_sd_loss,
+    logprob_branch_grad_norm,
+)
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
@@ -379,7 +383,13 @@ class DataParallelPPOActor(BasePPOActor):
         distillation_enabled = bool(distillation_config is not None and distillation_config.get("enabled", False))
         rl_coef = float(distillation_config.get("rl_coef", 1.0)) if distillation_enabled else 1.0
         opd_coef = float(distillation_config.get("coef", 0.0)) if distillation_enabled else 0.0
-        compute_opd = distillation_enabled and opd_coef != 0
+        loss_type = (
+            distillation_config.get("loss_type", "sampled_token_pg") if distillation_enabled else "sampled_token_pg"
+        )
+        if loss_type not in ("sampled_token_pg", "skill_sd"):
+            raise ValueError(f"Invalid distillation.loss_type: {loss_type}")
+        skill_sd_enabled = distillation_enabled and loss_type == "skill_sd"
+        compute_distillation = distillation_enabled and opd_coef != 0
 
         select_keys = [
             "responses",
@@ -390,7 +400,7 @@ class DataParallelPPOActor(BasePPOActor):
             "old_log_probs",
             "advantages",
         ]
-        if compute_opd:
+        if compute_distillation:
             select_keys.append("teacher_log_probs")
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
@@ -427,6 +437,24 @@ class DataParallelPPOActor(BasePPOActor):
 
                 self.actor_optimizer.zero_grad()
 
+                if skill_sd_enabled:
+                    # Report one accumulated loss per minibatch. Trainer metrics
+                    # are averaged later, so appending scaled micro-losses is wrong.
+                    skill_sd_metrics = {
+                        "actor/rl_loss": 0.0,
+                        "actor/pg_loss": 0.0,
+                        "actor/skill_sd_loss": 0.0,
+                        "actor/rl_coef": rl_coef,
+                        "actor/skill_sd_coef": opd_coef,
+                    }
+                    rl_logprob_grad_sq = 0.0
+                    skill_sd_logprob_grad_sq = 0.0
+                    mini_mask = mini_batch.batch["response_mask"].bool()
+                    mini_active_tokens = mini_mask.sum().item()
+                    mini_active_sequences = mini_mask.any(dim=-1).sum().item()
+                    if compute_distillation and mini_active_tokens == 0:
+                        raise ValueError("Skill-SD requires at least one active assistant token")
+
                 for micro_batch in micro_batches:
                     micro_batch = micro_batch.to(get_device_id())
                     micro_batch_metrics = {}
@@ -444,6 +472,17 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         loss_scale_factor = 1 / self.gradient_accumulation
 
+                    skill_sd_loss_scale_factor = loss_scale_factor
+                    if skill_sd_enabled and compute_distillation:
+                        active_mask = response_mask.bool()
+                        active_tokens = active_mask.sum().item()
+                        if loss_agg_mode == "token-mean":
+                            skill_sd_loss_scale_factor = active_tokens / mini_active_tokens
+                        elif loss_agg_mode in ("seq-mean-token-mean", "seq-mean-token-sum"):
+                            skill_sd_loss_scale_factor = active_mask.any(dim=-1).sum().item() / mini_active_sequences
+                        elif loss_agg_mode == "seq-mean-token-sum-norm":
+                            skill_sd_loss_scale_factor = 1.0
+
                     # all return: (bsz, response_length)
                     calculate_entropy = False
                     if entropy_coeff != 0:
@@ -452,8 +491,9 @@ class DataParallelPPOActor(BasePPOActor):
                         model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
                     )
                     if distillation_enabled:
+                        zero_log_prob = log_prob.float() if skill_sd_enabled else log_prob
                         differentiable_zero = (
-                            torch.where(response_mask.bool(), log_prob, torch.zeros_like(log_prob)).sum() * 0
+                            torch.where(response_mask.bool(), zero_log_prob, torch.zeros_like(zero_log_prob)).sum() * 0
                         )
 
                     # for fully_async_policy recipe
@@ -489,24 +529,40 @@ class DataParallelPPOActor(BasePPOActor):
                         )
                     else:
                         # Keep a differentiable zero while completely skipping the
-                        # reward/advantage policy-loss branch for pure OPD.
+                        # reward/advantage policy-loss branch for pure distillation.
                         pg_loss = differentiable_zero
                         pg_metrics = {}
                     micro_batch_metrics.update(pg_metrics)
 
-                    if compute_opd:
-                        opd_loss, opd_metrics = compute_sampled_token_opd_loss(
-                            log_prob=log_prob,
-                            old_log_prob=fixed_old_log_prob,
-                            teacher_log_prob=model_inputs["teacher_log_probs"],
-                            response_mask=response_mask,
-                            loss_agg_mode=loss_agg_mode,
-                            clip_ratio_low=self.config.clip_ratio_low,
-                            clip_ratio_high=self.config.clip_ratio_high,
-                        )
-                        micro_batch_metrics.update(opd_metrics)
+                    if compute_distillation:
+                        if skill_sd_enabled:
+                            if active_tokens:
+                                distillation_loss, distillation_metrics = compute_skill_sd_loss(
+                                    log_prob=log_prob,
+                                    old_log_prob=fixed_old_log_prob,
+                                    teacher_log_prob=model_inputs["teacher_log_probs"],
+                                    response_mask=response_mask,
+                                    loss_agg_mode=loss_agg_mode,
+                                )
+                                for key, value in distillation_metrics.items():
+                                    skill_sd_metrics[key] = (
+                                        skill_sd_metrics.get(key, 0.0) + value * active_tokens / mini_active_tokens
+                                    )
+                            else:
+                                distillation_loss = differentiable_zero
+                        else:
+                            distillation_loss, distillation_metrics = compute_sampled_token_opd_loss(
+                                log_prob=log_prob,
+                                old_log_prob=fixed_old_log_prob,
+                                teacher_log_prob=model_inputs["teacher_log_probs"],
+                                response_mask=response_mask,
+                                loss_agg_mode=loss_agg_mode,
+                                clip_ratio_low=self.config.clip_ratio_low,
+                                clip_ratio_high=self.config.clip_ratio_high,
+                            )
+                            micro_batch_metrics.update(distillation_metrics)
                     elif distillation_enabled:
-                        opd_loss = differentiable_zero
+                        distillation_loss = differentiable_zero
 
                     # Skip if using pure rollout correction mode (metrics already in pg_metrics)
                     rollout_log_prob = model_inputs.get("rollout_log_probs", None)
@@ -527,19 +583,40 @@ class DataParallelPPOActor(BasePPOActor):
                         micro_batch_metrics.update(rollout_corr_metrics)
 
                     if distillation_enabled:
-                        policy_loss = rl_coef * pg_loss + opd_coef * opd_loss
-                        micro_batch_metrics["actor/rl_loss"] = pg_loss.detach().item() * loss_scale_factor
-                        micro_batch_metrics["actor/opd_loss"] = opd_loss.detach().item() * loss_scale_factor
-                        micro_batch_metrics["actor/rl_coef"] = rl_coef
-                        micro_batch_metrics["actor/opd_coef"] = opd_coef
-                        # These are coefficient-weighted branch gradients with
-                        # respect to sampled-token log_prob, not parameter gradients.
-                        micro_batch_metrics["actor/rl_logprob_grad_norm"] = logprob_branch_grad_norm(
-                            rl_coef * pg_loss, log_prob
-                        )
-                        micro_batch_metrics["actor/opd_logprob_grad_norm"] = logprob_branch_grad_norm(
-                            opd_coef * opd_loss, log_prob
-                        )
+                        if skill_sd_enabled:
+                            policy_loss = rl_coef * pg_loss
+                            skill_sd_metrics["actor/rl_loss"] += pg_loss.detach().item() * loss_scale_factor
+                            skill_sd_metrics["actor/pg_loss"] += pg_loss.detach().item() * loss_scale_factor
+                            skill_sd_metrics["actor/skill_sd_loss"] += (
+                                distillation_loss.detach().item() * skill_sd_loss_scale_factor
+                            )
+                            # Concatenate microbatch log-probability gradients via
+                            # summed squared norms; these are not parameter norms.
+                            rl_logprob_grad_sq += (
+                                logprob_branch_grad_norm(rl_coef * pg_loss * loss_scale_factor, log_prob) ** 2
+                            )
+                            skill_sd_logprob_grad_sq += (
+                                logprob_branch_grad_norm(
+                                    opd_coef * distillation_loss * skill_sd_loss_scale_factor, log_prob
+                                )
+                                ** 2
+                            )
+                        else:
+                            policy_loss = rl_coef * pg_loss + opd_coef * distillation_loss
+                            micro_batch_metrics["actor/rl_loss"] = pg_loss.detach().item() * loss_scale_factor
+                            micro_batch_metrics["actor/opd_loss"] = (
+                                distillation_loss.detach().item() * loss_scale_factor
+                            )
+                            micro_batch_metrics["actor/rl_coef"] = rl_coef
+                            micro_batch_metrics["actor/opd_coef"] = opd_coef
+                            # Coefficient-weighted gradients with respect to
+                            # sampled-token log_prob, not parameter gradients.
+                            micro_batch_metrics["actor/rl_logprob_grad_norm"] = logprob_branch_grad_norm(
+                                rl_coef * pg_loss, log_prob
+                            )
+                            micro_batch_metrics["actor/opd_logprob_grad_norm"] = logprob_branch_grad_norm(
+                                opd_coef * distillation_loss, log_prob
+                            )
                     else:
                         policy_loss = pg_loss
 
@@ -566,16 +643,23 @@ class DataParallelPPOActor(BasePPOActor):
                         loss = policy_loss * loss_scale_factor
                     else:
                         loss = policy_loss * loss_scale_factor
+                    if skill_sd_enabled:
+                        loss = loss + opd_coef * distillation_loss * skill_sd_loss_scale_factor
                     if self.scaler is not None:
                         self.scaler.scale(loss).backward()
                     else:
                         loss.backward()
 
-                    micro_batch_metrics["actor/pg_loss"] = pg_loss.detach().item() * loss_scale_factor
+                    if not skill_sd_enabled:
+                        micro_batch_metrics["actor/pg_loss"] = pg_loss.detach().item() * loss_scale_factor
                     append_to_dict(metrics, micro_batch_metrics)
 
                 grad_norm = self._optimizer_step()
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
+                if skill_sd_enabled:
+                    skill_sd_metrics["actor/rl_logprob_grad_norm"] = rl_logprob_grad_sq**0.5
+                    skill_sd_metrics["actor/skill_sd_logprob_grad_norm"] = skill_sd_logprob_grad_sq**0.5
+                    mini_batch_metrics.update(skill_sd_metrics)
                 append_to_dict(metrics, mini_batch_metrics)
         self.actor_optimizer.zero_grad()
         return metrics

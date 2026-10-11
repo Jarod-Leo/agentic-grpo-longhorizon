@@ -3,8 +3,8 @@
 import json
 import runpy
 from pathlib import Path
-import pytest
 
+import pytest
 
 summary_module = runpy.run_path(
     str(Path(__file__).resolve().parents[3] / "scripts/eval/summarize_qwen3.py")
@@ -99,24 +99,27 @@ def test_periodic_eval_and_external_checkpoints(tmp_path):
         for task in [1, 4]:
             for sample in range(4):
                 rows.append(
-                    dict(
-                        trajectory_id=f"{step}-{validate}-{task}-{sample}",
-                        step=step,
-                        validate=validate,
-                        task_id=task,
-                        split="train",
-                        score=int(validate),
-                        protocol="v2",
-                        schema_verified=True,
-                    )
+                    {
+                        "trajectory_id": f"{step}-{validate}-{task}-{sample}",
+                        "step": step,
+                        "validate": validate,
+                        "task_id": task,
+                        "split": "train",
+                        "score": int(validate),
+                        "protocol": "v2",
+                        "schema_verified": True,
+                    }
                 )
     for name, values in [
         ("eval_trajectories", rows),
         (
             "tool_audit",
-            [dict(event="generation", trajectory_id=r["trajectory_id"]) for r in rows],
+            [
+                {"event": "generation", "trajectory_id": r["trajectory_id"]}
+                for r in rows
+            ],
         ),
-        ("metrics", [dict(step=i, data={"actor/grad_norm": 0.1}) for i in [1, 2]]),
+        ("metrics", [{"step": i, "data": {"actor/grad_norm": 0.1}} for i in [1, 2]]),
     ]:
         (tmp_path / f"{name}.jsonl").write_text(
             "".join(json.dumps(r) + "\n" for r in values)
@@ -300,4 +303,42 @@ def test_self_distillation_requires_consistent_feedback_coverage(tmp_path):
     assert not build_summary(tmp_path)[0]["accepted"]
     data.pop("distillation/feedback_tokens")
     path.write_text(json.dumps({"step": 1, "data": data}) + "\n")
+    assert not build_summary(tmp_path)[0]["accepted"]
+
+
+def test_skill_sd_uses_its_own_loss_keys_and_checks_skill_coverage(tmp_path):
+    write_joint_run(tmp_path)
+    path = tmp_path / "run.json"
+    meta = json.loads(path.read_text())
+    meta["distillation"] = {
+        "actor": {
+            "enabled": True,
+            "coef": 0.001,
+            "rl_coef": 1.0,
+            "loss_type": "skill_sd",
+        },
+        "teacher": {"teacher_mode": "external", "use_skills": True},
+    }
+    path.write_text(json.dumps(meta))
+    data = {
+        "actor/grad_norm": 0.1,
+        "actor/skill_sd_loss": 0.2,
+        "actor/rl_loss": -0.1,
+        "actor/skill_sd_coef": 0.001,
+        "actor/rl_coef": 1.0,
+        "actor/skill_sd_signal_token_fraction": 0.5,
+        "distillation/scored_tokens": 20,
+        "distillation/scored_trajectories": 8,
+        "distillation/policy_version": 0,
+        "distillation/skill_trajectories": 4,
+        "distillation/skill_tokens": 200,
+        "distillation/skill_coverage": 0.5,
+    }
+    metrics = tmp_path / "metrics.jsonl"
+    metrics.write_text(json.dumps({"step": 1, "data": data}) + "\n")
+    result, _ = build_summary(tmp_path)
+    assert result["accepted"], result["checks"]
+    assert result["learning"]["distillation_loss_type"] == "skill_sd"
+    data["distillation/skill_coverage"] = 1.0
+    metrics.write_text(json.dumps({"step": 1, "data": data}) + "\n")
     assert not build_summary(tmp_path)[0]["accepted"]

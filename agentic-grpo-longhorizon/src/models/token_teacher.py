@@ -11,7 +11,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -70,6 +72,94 @@ def input_ids_sha256(input_ids: Sequence[int]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def validate_local_model_revision(
+    model_path: str | Path, expected_revision: str
+) -> None:
+    """Verify local HF config/weight provenance without reading large weight files."""
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_revision):
+        raise ValueError(
+            "Teacher base revision must be an immutable 40-character HF commit"
+        )
+    root = Path(model_path).resolve()
+    files = ["config.json"]
+    for name in (
+        "model.safetensors",
+        "model.safetensors.index.json",
+        "pytorch_model.bin",
+        "pytorch_model.bin.index.json",
+    ):
+        path = root / name
+        if not path.is_file():
+            continue
+        files.append(name)
+        if name.endswith(".index.json"):
+            weights = sorted(
+                set(json.loads(path.read_text()).get("weight_map", {}).values())
+            )
+            if not weights or any(
+                not isinstance(item, str) or Path(item).name != item for item in weights
+            ):
+                raise ValueError(
+                    "Teacher base weight index must reference local shard filenames"
+                )
+            files.extend(weights)
+        break
+    else:
+        raise ValueError(f"Teacher base directory has no HF model weights: {root}")
+    if any(not (root / name).is_file() for name in files):
+        raise ValueError("Teacher base config or weight shard is missing")
+    if root.parent.name == "snapshots":
+        if root.name != expected_revision:
+            raise ValueError("Teacher base snapshot revision mismatch")
+        return
+    for name in files:
+        metadata = root / ".cache/huggingface/download" / f"{name}.metadata"
+        if not metadata.is_file():
+            raise ValueError(
+                f"Teacher base download revision metadata is missing: {name}"
+            )
+        lines = metadata.read_text().splitlines()
+        if not lines or lines[0].strip() != expected_revision:
+            raise ValueError(f"Teacher base download revision mismatch: {name}")
+
+
+def adapter_sha256(adapter_path: str | Path) -> str:
+    """Pin PEFT config and weights, including filenames and every weight shard."""
+    root = Path(adapter_path)
+    config = root / "adapter_config.json"
+    weights = sorted(root.glob("adapter_model*.safetensors")) or sorted(
+        root.glob("adapter_model*.bin")
+    )
+    if not config.is_file() or not weights:
+        raise ValueError(f"Missing PEFT adapter config or weights: {root}")
+    files = [config, *weights, *sorted(root.glob("adapter_model*.index.json"))]
+    digest = hashlib.sha256()
+    for path in sorted(files):
+        file_digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                file_digest.update(block)
+        digest.update(path.name.encode("utf-8") + b"\0")
+        digest.update(file_digest.digest())
+    return digest.hexdigest()
+
+
+def load_frozen_adapter(
+    model: torch.nn.Module, adapter_path: str | Path, expected_sha256: str
+) -> torch.nn.Module:
+    """Load PEFT in memory, including any saved head, without merging/exporting."""
+    if not expected_sha256 or adapter_sha256(adapter_path) != expected_sha256:
+        raise ValueError("Teacher adapter SHA256 mismatch")
+    from peft import PeftModel
+
+    model = PeftModel.from_pretrained(
+        model, str(adapter_path), is_trainable=False, local_files_only=True
+    )
+    model.requires_grad_(False)
+    model.eval()
+    return model
+
+
 class FrozenTokenTeacher:
     """Score sampled response tokens with a frozen causal language model."""
 
@@ -81,6 +171,9 @@ class FrozenTokenTeacher:
         revision: str,
         max_length: int = 24576,
         logit_chunk_size: int = 128,
+        adapter_path: str | None = None,
+        adapter_sha256: str | None = None,
+        revision_verified: bool = False,
     ) -> None:
         if not model_id:
             raise ValueError("model_id must be non-empty")
@@ -90,13 +183,20 @@ class FrozenTokenTeacher:
             raise ValueError("max_length must be at least 2")
         if logit_chunk_size < 1:
             raise ValueError("logit_chunk_size must be positive")
+        if bool(adapter_path) != bool(adapter_sha256):
+            raise ValueError(
+                "Teacher adapter path and SHA256 must be supplied together"
+            )
 
         self.model = model
         self.tokenizer = tokenizer
         self.model_id = model_id
         self.revision = revision
+        self.revision_verified = revision_verified
         self.max_length = max_length
         self.logit_chunk_size = logit_chunk_size
+        self.adapter_path = str(Path(adapter_path).resolve()) if adapter_path else None
+        self.adapter_sha256 = adapter_sha256 or None
         self.tokenizer_fingerprint = tokenizer_fingerprint(tokenizer)
 
         vocab = tokenizer.get_vocab()
@@ -114,8 +214,11 @@ class FrozenTokenTeacher:
             "status": "ready",
             "model_id": self.model_id,
             "revision": self.revision,
+            "revision_verified": self.revision_verified,
             "tokenizer_fingerprint": self.tokenizer_fingerprint,
             "max_length": self.max_length,
+            "adapter_path": self.adapter_path,
+            "adapter_sha256": self.adapter_sha256,
         }
 
     def score(self, request: Mapping[str, Any]) -> dict[str, Any]:
@@ -211,7 +314,10 @@ class FrozenTokenTeacher:
             "tokenizer_fingerprint": self.tokenizer_fingerprint,
             "model_id": self.model_id,
             "revision": self.revision,
+            "revision_verified": self.revision_verified,
             "policy_version": policy_version,
+            "adapter_path": self.adapter_path,
+            "adapter_sha256": self.adapter_sha256,
         }
 
     def _validate_request(
@@ -232,6 +338,19 @@ class FrozenTokenTeacher:
             raise TokenTeacherValidationError(
                 f"request is missing required fields: {sorted(missing)}"
             )
+
+        identity = {
+            "model_id": self.model_id,
+            "revision": self.revision,
+            "revision_verified": self.revision_verified,
+            "adapter_path": self.adapter_path,
+            "adapter_sha256": self.adapter_sha256,
+        }
+        for key, expected in identity.items():
+            if (
+                key in request or (self.adapter_sha256 and key.startswith("adapter_"))
+            ) and request.get(key) != expected:
+                raise TokenTeacherValidationError(f"Teacher {key} identity mismatch")
 
         raw_ids = request["input_ids"]
         if not isinstance(raw_ids, list) or not raw_ids:

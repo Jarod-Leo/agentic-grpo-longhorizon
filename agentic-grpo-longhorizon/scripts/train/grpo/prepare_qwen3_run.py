@@ -9,9 +9,9 @@ import os
 from pathlib import Path
 
 import pandas as pd
+from build_grpo_parquet import PROTOCOL, build_rows
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
-from build_grpo_parquet import PROTOCOL, build_rows
 
 
 def main() -> None:
@@ -28,6 +28,12 @@ def main() -> None:
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--adapter", type=Path)
     parser.add_argument("--config-name")
+    parser.add_argument(
+        "--override",
+        action="append",
+        default=[],
+        help="Applied Hydra configuration override",
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[3]
     config_name = args.config_name or (
@@ -37,7 +43,7 @@ def main() -> None:
         "configs/train/grpo" if args.mode == "train" else "configs/eval/qwen3"
     )
     with initialize_config_dir(config_dir=str(config_dir), version_base=None):
-        method_config = compose(config_name=config_name)
+        method_config = compose(config_name=config_name, overrides=args.override)
     reward_mode = str(
         OmegaConf.select(method_config, "tau_bench_reward_mode", default="binary")
     )
@@ -50,6 +56,52 @@ def main() -> None:
     train, test = split["seen_task_ids"], split["unseen_task_ids"]
     assert len(train) == 40 and len(test) == 10
     assert set(train).isdisjoint(test) and sorted(train + test) == list(range(50))
+    skill_metadata = None
+    teacher_config = OmegaConf.select(method_config, "distillation")
+    if teacher_config is not None and teacher_config.get(
+        "teacher_verify_revision", False
+    ):
+        from src.models.token_teacher import validate_local_model_revision
+
+        validate_local_model_revision(
+            teacher_config.teacher_model_path, teacher_config.teacher_revision
+        )
+    if teacher_config is not None and teacher_config.get("teacher_adapter_path"):
+        from src.models.token_teacher import adapter_sha256
+
+        expected = teacher_config.get("teacher_adapter_sha256")
+        actual = adapter_sha256(teacher_config.teacher_adapter_path)
+        if not expected or actual != expected:
+            raise ValueError("Teacher adapter SHA256 mismatch before run preparation")
+    if (
+        teacher_config is not None
+        and teacher_config.get("scorer")
+        == "src.training.distillation.score_skill_teacher"
+    ):
+        from src.training.skill_bank import file_sha256, load_skill_bank
+
+        configured_split = Path(teacher_config.split_path).resolve()
+        if file_sha256(configured_split) != file_sha256(split_path):
+            raise ValueError("Skill teacher split differs from run train/test split")
+        use_skills = bool(teacher_config.use_skills)
+        bank = (
+            load_skill_bank(
+                teacher_config.skill_bank_path,
+                teacher_config.skill_bank_sha256,
+                str(split_path),
+            )
+            if use_skills
+            else {}
+        )
+        skill_metadata = {
+            "use_skills": use_skills,
+            "path": teacher_config.skill_bank_path,
+            "sha256": teacher_config.skill_bank_sha256,
+            "covered_train_task_ids": sorted(bank),
+            "fallback_train_task_ids": sorted(set(train) - set(bank)),
+            "coverage": len(bank) / len(train),
+            "prefix_max_tokens": int(teacher_config.skill_prefix_max_tokens),
+        }
     start = 0
     if args.resume:
         start = int(args.resume.name.removeprefix("global_step_"))
@@ -123,6 +175,8 @@ def main() -> None:
         "split_sha256": hashlib.sha256(split_path.read_bytes()).hexdigest(),
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
     }
+    if skill_metadata is not None:
+        metadata["distillation"]["skill_bank"] = skill_metadata
     (args.run / "run.json").write_text(json.dumps(metadata, indent=2) + "\n")
     print(
         f"INPUTS_READY protocol={PROTOCOL} mode={args.mode} config={config_name} "

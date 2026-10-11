@@ -250,11 +250,15 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
         }
         distill = meta.get("distillation", {}).get("actor", {})
         if distill.get("enabled", False) and distill.get("coef", 0) > 0:
+            objective = "skill_sd" if distill.get("loss_type") == "skill_sd" else "opd"
+            learning["distillation_loss_type"] = distill.get(
+                "loss_type", "sampled_token_pg"
+            )
             required = {
-                "actor/opd_loss",
+                f"actor/{objective}_loss",
                 "actor/rl_loss",
-                "actor/opd_signal_token_fraction",
-                "actor/opd_coef",
+                f"actor/{objective}_signal_token_fraction",
+                f"actor/{objective}_coef",
                 "actor/rl_coef",
                 "distillation/scored_tokens",
                 "distillation/scored_trajectories",
@@ -267,21 +271,45 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
                 and row["data"]["distillation/scored_trajectories"]
                 == meta["train_batch_size"] * meta["samples_per_task"]
                 and row["data"]["distillation/policy_version"] == row["step"] - 1
-                and 0 <= row["data"]["actor/opd_signal_token_fraction"] <= 1
-                and math.isclose(row["data"]["actor/opd_coef"], distill["coef"])
+                and 0 <= row["data"][f"actor/{objective}_signal_token_fraction"] <= 1
+                and math.isclose(
+                    row["data"][f"actor/{objective}_coef"], distill["coef"]
+                )
                 and math.isclose(row["data"]["actor/rl_coef"], distill["rl_coef"])
                 and (distill["rl_coef"] != 0 or row["data"]["actor/rl_loss"] == 0)
                 for row in actor_metrics
             )
             teacher_signal = any(
                 finite_number(
-                    row.get("data", {}).get("actor/opd_signal_token_fraction")
+                    row.get("data", {}).get(f"actor/{objective}_signal_token_fraction")
                 )
-                and row["data"]["actor/opd_signal_token_fraction"] > 0
+                and row["data"][f"actor/{objective}_signal_token_fraction"] > 0
                 for row in actor_metrics
             )
             teacher = meta.get("distillation", {}).get("teacher") or {}
             learning["teacher_mode"] = teacher.get("teacher_mode", "external")
+            if objective == "skill_sd":
+                skill_fields = {
+                    "distillation/skill_trajectories",
+                    "distillation/skill_tokens",
+                    "distillation/skill_coverage",
+                }
+                checks["skill_metrics_complete"] = bool(actor_metrics) and all(
+                    skill_fields.issubset(row.get("data", {}))
+                    and all(finite_number(row["data"][key]) for key in skill_fields)
+                    and 0
+                    <= row["data"]["distillation/skill_trajectories"]
+                    <= row["data"].get("distillation/scored_trajectories", 0)
+                    and row["data"]["distillation/skill_tokens"] >= 0
+                    and math.isclose(
+                        row["data"]["distillation/skill_coverage"],
+                        row["data"]["distillation/skill_trajectories"]
+                        / max(
+                            row["data"].get("distillation/scored_trajectories", 0), 1
+                        ),
+                    )
+                    for row in actor_metrics
+                )
             if teacher.get("teacher_mode") == "self_feedback":
                 feedback_fields = {
                     "distillation/feedback_trajectories",

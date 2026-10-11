@@ -16,4 +16,4 @@ export REPO=$SOURCE_ROOT/agentic-grpo-longhorizon
 export PYTHONPATH="$SOURCE_ROOT/verl:$SOURCE_ROOT/tau-bench:$REPO:$AGENTRL_ROOT/runs/grpo_probe_20260919/triton-3.3.1${PYTHONPATH:+:$PYTHONPATH}"
 mkdir -p "$RUN_ROOT"
 scontrol show job "$SLURM_JOB_ID" > "$RUN_ROOT/allocation.txt"
-srun bash "$REPO/${TASK_ENTRY:-scripts/train/grpo/check_qwen3.sh}"
+srun "${TASK_INTERPRETER:-bash}" "$REPO/${TASK_ENTRY:-scripts/train/grpo/check_qwen3.sh}" "$@"

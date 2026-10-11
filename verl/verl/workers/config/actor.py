@@ -54,13 +54,16 @@ class PolicyLossConfig(BaseConfig):
 
 @dataclass
 class DistillationConfig(BaseConfig):
-    """Configuration for sampled-token policy-gradient distillation."""
+    """Configuration for sampled-token policy-gradient or Skill-SD distillation."""
 
     enabled: bool = False
     rl_coef: float = 1.0
     coef: float = 0.0
+    loss_type: str = "sampled_token_pg"
 
     def __post_init__(self):
+        if self.loss_type not in ("sampled_token_pg", "skill_sd"):
+            raise ValueError(f"Invalid distillation.loss_type: {self.loss_type}")
         for name in ("rl_coef", "coef"):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:

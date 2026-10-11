@@ -14,6 +14,7 @@ finish_qwen3_run() {
 
 setup_qwen3_run() {
     local MODE=$1
+    shift
     cd "$(dirname "${BASH_SOURCE[0]}")/../../.."
     export REPO=$(pwd)
     test -n "${SLURM_JOB_ID:-}" || { echo 'Run GPU work inside Slurm' >&2; exit 2; }
@@ -61,6 +62,10 @@ setup_qwen3_run() {
         CONFIG_NAME=${QWEN3_CONFIG:-qwen3_mimo}
     fi
     prepare+=(--config-name "$CONFIG_NAME")
+    local override
+    for override in "$@"; do
+        prepare+=(--override "$override")
+    done
     prepare+=(--save-freq "${SAVE_FREQ:-1}" --eval-freq "${EVAL_FREQ:--1}" --eval-samples "${EVAL_SAMPLES:-8}"
         --checkpoint-root "$CHECKPOINT_ROOT")
     QWEN3_OVERRIDES=()

@@ -9,7 +9,7 @@ fi
 [ "${1:-}" != train ] || shift
 
 source "$(dirname "$0")/qwen3_runtime.sh"
-setup_qwen3_run train
+setup_qwen3_run train "$@"
 python -m verl.trainer.main_ppo \
     --config-path="$REPO/configs/train/grpo" --config-name="${QWEN3_CONFIG:-qwen3_mimo}" \
     "${QWEN3_OVERRIDES[@]}" "$@" 2>&1 | tee "$RUN_DIR/run.log"

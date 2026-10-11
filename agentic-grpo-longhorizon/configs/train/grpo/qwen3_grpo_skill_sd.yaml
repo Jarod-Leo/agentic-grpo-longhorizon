@@ -1,0 +1,36 @@
+# GRPO with a fixed E01 step-200 teacher and offline training-task skills.
+hydra:
+  searchpath:
+    - pkg://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - qwen3_common
+  - qwen3_performance
+  - qwen3_distillation_common
+  - _self_
+
+actor_rollout_ref:
+  actor:
+    distillation:
+      loss_type: skill_sd
+      rl_coef: 1.0
+      coef: 0.001
+
+distillation:
+  scorer: src.training.distillation.score_skill_teacher
+  teacher_mode: external
+  teacher_model_id: ${oc.env:TEACHER_MODEL_ID,Qwen/Qwen3-8B}
+  teacher_model_path: ${oc.env:TEACHER_MODEL,/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/models/Qwen/Qwen3-8B}
+  teacher_revision: ${oc.env:TEACHER_REVISION,b968826d9c46dd6066d109eabc6255188de91218}
+  teacher_verify_revision: true
+  teacher_adapter_path: ${oc.env:TEACHER_ADAPTER_PATH,/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/checkpoints/e01_vanilla_grpo/formal-seed42-200-v3/global_step_200/actor/lora_adapter}
+  teacher_adapter_sha256: ${oc.env:TEACHER_ADAPTER_SHA256}
+  teacher_max_length: 24576
+  endpoint: ${oc.env:TEACHER_ENDPOINT,http://127.0.0.1:18932}
+  timeout_s: 600
+  use_skills: true
+  skill_bank_path: ${oc.env:SKILL_BANK_PATH,""}
+  skill_bank_sha256: ${oc.env:SKILL_BANK_SHA256,""}
+  split_path: ${oc.env:REPO}/experiments/sft_collect_airline/split.json
+  skill_prefix_max_tokens: 512

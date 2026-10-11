@@ -1,29 +1,29 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
 import json
 import runpy
-from pathlib import Path
 import threading
 import urllib.error
 import urllib.request
+from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
-from transformers import Qwen3Config, Qwen3ForCausalLM
-
-from verl.workers.actor.dp_actor import DataParallelPPOActor
-from verl.workers.config import FSDPActorConfig
-
 from src.models.token_teacher import (
     FrozenTokenTeacher,
     TokenTeacherValidationError,
+    adapter_sha256,
     input_ids_sha256,
+    load_frozen_adapter,
     tokenizer_fingerprint,
+    validate_local_model_revision,
 )
-
+from transformers import Qwen3Config, Qwen3ForCausalLM
+from verl.workers.actor.dp_actor import DataParallelPPOActor
+from verl.workers.config import FSDPActorConfig
 
 create_server = runpy.run_path(
     str(
@@ -60,6 +60,7 @@ class TinyCausalLM(torch.nn.Module):
         transition = torch.sin(transition / 7.0) + 3.0 * torch.eye(vocab_size)
         self.transition = torch.nn.Parameter(transition)
         self.training_states: list[bool] = []
+        self.input_sequences: list[list[int]] = []
 
     def forward(
         self, input_ids: torch.Tensor, use_cache: bool, return_dict: bool
@@ -67,6 +68,7 @@ class TinyCausalLM(torch.nn.Module):
         assert use_cache is False
         assert return_dict is True
         self.training_states.append(self.training)
+        self.input_sequences.append(input_ids[0].tolist())
         return SimpleNamespace(logits=self.transition[input_ids])
 
 
@@ -129,6 +131,151 @@ def test_future_token_perturbation_does_not_change_earlier_scores(
 
     assert perturbed[:2] == pytest.approx(original[:2])
     assert perturbed[2] != pytest.approx(original[2])
+
+
+def test_prefix_keeps_response_causal_shift_and_zero_mask(
+    teacher: FrozenTokenTeacher,
+) -> None:
+    original = [1, 2, 3, 4, 5]
+    prefixed = [6, 7] + original
+    plain = teacher.score(request_for(teacher, original, [1, 0, 1]))
+    result = teacher.score(request_for(teacher, prefixed, [1, 0, 1]))
+    assert teacher.model.input_sequences[-1] == prefixed
+    assert result["response_start"] == plain["response_start"] + 2
+    assert result["response_mask"] == [1, 0, 1]
+    assert result["teacher_log_probs"] == pytest.approx(plain["teacher_log_probs"])
+    assert result["teacher_log_probs"][1] == 0.0
+    assert result["input_sha256"] == input_ids_sha256(prefixed)
+
+
+def test_peft_adapter_loads_saved_head_and_freezes_without_export(
+    tmp_path: Path,
+) -> None:
+    from peft import LoraConfig, get_peft_model
+
+    torch.manual_seed(11)
+    config = Qwen3Config(
+        vocab_size=12,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+        max_position_embeddings=32,
+        use_cache=False,
+    )
+    config._attn_implementation = "eager"
+    base = Qwen3ForCausalLM(config)
+    base_state = {name: value.clone() for name, value in base.state_dict().items()}
+    adapted = get_peft_model(
+        base,
+        LoraConfig(
+            r=2,
+            lora_alpha=4,
+            target_modules=["q_proj", "v_proj"],
+            modules_to_save=["lm_head"],
+            task_type="CAUSAL_LM",
+        ),
+    ).eval()
+    with torch.no_grad():
+        for name, parameter in adapted.named_parameters():
+            if "lm_head.modules_to_save.default.weight" in name:
+                parameter.copy_(
+                    torch.arange(parameter.numel()).reshape_as(parameter) / 100
+                )
+    path = tmp_path / "adapter"
+    adapted.save_pretrained(path)
+    digest = adapter_sha256(path)
+    with pytest.raises(ValueError, match="SHA256"):
+        load_frozen_adapter(Qwen3ForCausalLM(config), path, "wrong")
+    fresh_base = Qwen3ForCausalLM(config)
+    fresh_base.load_state_dict(base_state)
+    loaded = load_frozen_adapter(fresh_base, path, digest)
+    assert loaded.training is False
+    assert all(not parameter.requires_grad for parameter in loaded.parameters())
+    assert not hasattr(loaded, "merged") or not loaded.merged
+    tokens = torch.tensor([[1, 2, 3, 4]])
+    with torch.inference_mode():
+        torch.testing.assert_close(loaded(tokens).logits, adapted(tokens).logits)
+    assert (path / "adapter_model.safetensors").is_file()
+    assert not (path / "model.safetensors").exists()
+    original_config = (path / "adapter_config.json").read_text()
+    (path / "adapter_config.json").write_text(original_config + "\n")
+    assert adapter_sha256(path) != digest
+    with pytest.raises(ValueError, match="SHA256"):
+        load_frozen_adapter(Qwen3ForCausalLM(config), path, digest)
+
+
+def test_adapter_identity_is_required_and_echoed(tmp_path: Path) -> None:
+    teacher = FrozenTokenTeacher(
+        model=TinyCausalLM(),
+        tokenizer=TinyTokenizer(),
+        model_id="tiny",
+        revision="base-revision",
+        adapter_path=str(tmp_path),
+        adapter_sha256="pinned-hash",
+    )
+    request = request_for(teacher, [1, 2, 3, 4], [1, 0])
+    with pytest.raises(TokenTeacherValidationError, match="adapter_path"):
+        teacher.score(request)
+    request.update(
+        model_id="tiny",
+        revision="base-revision",
+        adapter_path=str(tmp_path.resolve()),
+        adapter_sha256="pinned-hash",
+    )
+    result = teacher.score(request)
+    assert (
+        result["adapter_sha256"] == teacher.health()["adapter_sha256"] == "pinned-hash"
+    )
+    assert result["adapter_path"] == str(tmp_path.resolve())
+    request["adapter_sha256"] = "changed"
+    with pytest.raises(TokenTeacherValidationError, match="adapter_sha256"):
+        teacher.score(request)
+
+
+def test_local_download_revision_checks_config_index_and_every_shard(
+    tmp_path: Path,
+) -> None:
+    revision = "a" * 40
+    names = [
+        "config.json",
+        "model.safetensors.index.json",
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors",
+    ]
+    metadata = tmp_path / ".cache/huggingface/download"
+    metadata.mkdir(parents=True)
+    for name in names:
+        (tmp_path / name).write_text("{}")
+        (metadata / f"{name}.metadata").write_text(revision + "\netag\n123\n")
+    (tmp_path / names[1]).write_text(
+        json.dumps({"weight_map": {"first": names[2], "second": names[3]}})
+    )
+    validate_local_model_revision(tmp_path, revision)
+    (metadata / f"{names[3]}.metadata").write_text("b" * 40 + "\netag\n123\n")
+    with pytest.raises(ValueError, match="revision mismatch.*00002"):
+        validate_local_model_revision(tmp_path, revision)
+    (metadata / f"{names[3]}.metadata").write_text(revision + "\netag\n123\n")
+    (metadata / "config.json.metadata").unlink()
+    with pytest.raises(ValueError, match="metadata is missing.*config"):
+        validate_local_model_revision(tmp_path, revision)
+
+
+def test_local_snapshot_revision_uses_resolved_commit_directory(tmp_path: Path) -> None:
+    revision = "c" * 40
+    snapshot = tmp_path / "snapshots" / revision
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}")
+    (snapshot / "model.safetensors").write_text("tiny weight placeholder")
+    model_path = tmp_path / "model-alias"
+    model_path.symlink_to(snapshot, target_is_directory=True)
+    validate_local_model_revision(model_path, revision)
+    with pytest.raises(ValueError, match="snapshot revision mismatch"):
+        validate_local_model_revision(model_path, "d" * 40)
+    with pytest.raises(ValueError, match="immutable"):
+        validate_local_model_revision(model_path, "main")
 
 
 def test_tiny_qwen3_matches_actor_causal_shift() -> None:

@@ -22,4 +22,4 @@ mkdir -p "$RUN_ROOT"
 scontrol show job "$SLURM_JOB_ID" > "$RUN_ROOT/allocation.txt"
 srun --ntasks=2 --gpus-per-task=1 --gpu-bind=single:1 --kill-on-bad-exit=1 \
     --output="$RUN_ROOT/rank-%t.out" --error="$RUN_ROOT/rank-%t.err" \
-    bash "$REPO/scripts/train/grpo/run_qwen3_teacher_pair.sh"
+    bash "$REPO/scripts/train/grpo/run_qwen3_teacher_pair.sh" "$@"

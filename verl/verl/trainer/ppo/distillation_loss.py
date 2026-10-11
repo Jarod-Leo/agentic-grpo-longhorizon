@@ -2,7 +2,7 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
-"""Losses for online policy distillation."""
+"""Sampled-token losses for online policy distillation."""
 
 import math
 from typing import Any
@@ -13,7 +13,7 @@ import verl.utils.torch_functional as verl_F
 from verl.trainer.ppo.core_algos import agg_loss
 
 
-def _validate_opd_inputs(
+def _validate_distillation_inputs(
     log_prob: torch.Tensor,
     old_log_prob: torch.Tensor,
     teacher_log_prob: torch.Tensor,
@@ -32,7 +32,7 @@ def _validate_opd_inputs(
         raise ValueError("response_mask must contain only finite values")
     active_mask = response_mask.bool()
     if not active_mask.any():
-        raise ValueError("OPD requires at least one active assistant token")
+        raise ValueError("Distillation requires at least one active assistant token")
 
     for name, value in (
         ("log_prob", log_prob),
@@ -66,7 +66,7 @@ def compute_sampled_token_opd_loss(
     if clip_ratio_low >= 1:
         raise ValueError(f"clip_ratio_low must be less than 1, got {clip_ratio_low}")
 
-    active_mask = _validate_opd_inputs(log_prob, old_log_prob, teacher_log_prob, response_mask)
+    active_mask = _validate_distillation_inputs(log_prob, old_log_prob, teacher_log_prob, response_mask)
     loss_mask = active_mask.to(dtype=log_prob.dtype)
 
     # Neutralize masked NaNs before arithmetic so tool, user, and padding
@@ -107,6 +107,47 @@ def compute_sampled_token_opd_loss(
     return loss, metrics
 
 
+def compute_skill_sd_loss(
+    log_prob: torch.Tensor,
+    old_log_prob: torch.Tensor,
+    teacher_log_prob: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "seq-mean-token-mean",
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute the Skill-SD sampled-token objective ``rho * k3`` in FP32.
+
+    ``ell = current - teacher`` and ``rho = exp(current - sampling_policy)``.
+    Both teacher and sampling-policy scores are fixed; rho stays differentiable.
+    The per-token derivative with respect to current log-probability is rho * ell.
+    This sampled-token estimator does not compute a full-vocabulary KL.
+    """
+    active_mask = _validate_distillation_inputs(log_prob, old_log_prob, teacher_log_prob, response_mask)
+    loss_mask = active_mask.float()
+    zeros = torch.zeros_like(log_prob, dtype=torch.float32)
+    # Mask before arithmetic so tool, user, and padding NaNs have zero gradient.
+    current = torch.where(active_mask, log_prob.float(), zeros)
+    old = torch.where(active_mask, old_log_prob.detach().float(), zeros)
+    teacher = torch.where(active_mask, teacher_log_prob.detach().float(), zeros)
+
+    ell = current - teacher
+    rho = torch.exp(current - old)
+    k3 = torch.expm1(-ell) + ell
+    loss_mat = rho * k3
+    if not torch.isfinite(loss_mat[active_mask]).all():
+        raise ValueError("Skill-SD objective must be finite at active assistant tokens")
+    loss = agg_loss(loss_mat=loss_mat, loss_mask=loss_mask, loss_agg_mode=loss_agg_mode)
+    if not torch.isfinite(loss):
+        raise ValueError("Skill-SD aggregated loss must be finite")
+
+    metrics = {
+        "actor/skill_sd_ell_mean": verl_F.masked_mean(ell, loss_mask).detach().item(),
+        "actor/skill_sd_rho_mean": verl_F.masked_mean(rho, loss_mask).detach().item(),
+        "actor/skill_sd_k3_mean": verl_F.masked_mean(k3, loss_mask).detach().item(),
+        "actor/skill_sd_signal_token_fraction": verl_F.masked_mean(ell.ne(0).float(), loss_mask).detach().item(),
+    }
+    return loss, metrics
+
+
 def logprob_branch_grad_norm(loss: torch.Tensor, log_prob: torch.Tensor) -> float:
     """Return a branch loss gradient norm with respect to sampled-token log-probability.
 
@@ -121,4 +162,4 @@ def logprob_branch_grad_norm(loss: torch.Tensor, log_prob: torch.Tensor) -> floa
     return torch.linalg.vector_norm(gradient.detach().float()).item()
 
 
-__all__ = ["compute_sampled_token_opd_loss", "logprob_branch_grad_norm"]
+__all__ = ["compute_sampled_token_opd_loss", "compute_skill_sd_loss", "logprob_branch_grad_norm"]

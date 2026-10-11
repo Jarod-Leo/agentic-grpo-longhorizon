@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Serve frozen Qwen3-32B token log probabilities on localhost."""
+"""Serve a frozen causal LM, optionally with a pinned PEFT adapter, on localhost."""
 
 from __future__ import annotations
 
@@ -9,7 +8,12 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
-from src.models.token_teacher import FrozenTokenTeacher, TokenTeacherValidationError
+from src.models.token_teacher import (
+    FrozenTokenTeacher,
+    TokenTeacherValidationError,
+    load_frozen_adapter,
+    validate_local_model_revision,
+)
 
 MAX_REQUEST_BYTES = 16 * 1024 * 1024
 
@@ -18,7 +22,7 @@ def make_handler(teacher: FrozenTokenTeacher) -> type[BaseHTTPRequestHandler]:
     class TokenTeacherHandler(BaseHTTPRequestHandler):
         server_version = "TokenTeacher/1"
 
-        def do_GET(self) -> None:  # noqa: N802
+        def do_GET(self) -> None:
             if self.path != "/health":
                 self._write_json(
                     HTTPStatus.NOT_FOUND, {"error": "not found", "type": "NotFound"}
@@ -26,7 +30,7 @@ def make_handler(teacher: FrozenTokenTeacher) -> type[BaseHTTPRequestHandler]:
                 return
             self._write_json(HTTPStatus.OK, teacher.health())
 
-        def do_POST(self) -> None:  # noqa: N802
+        def do_POST(self) -> None:
             if self.path != "/score":
                 self._write_json(
                     HTTPStatus.NOT_FOUND, {"error": "not found", "type": "NotFound"}
@@ -46,7 +50,7 @@ def make_handler(teacher: FrozenTokenTeacher) -> type[BaseHTTPRequestHandler]:
                     {"error": str(error), "type": type(error).__name__},
                 )
                 return
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - HTTP boundary returns a structured server failure.
                 self._write_json(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                     {"error": str(error), "type": type(error).__name__},
@@ -102,7 +106,7 @@ def create_server(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--model-path", required=True, help="Local Qwen3-32B model directory"
+        "--model-path", required=True, help="Local base-model directory"
     )
     parser.add_argument("--model-id", default="Qwen/Qwen3-32B")
     parser.add_argument(
@@ -114,11 +118,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8124)
     parser.add_argument("--max-length", type=int, default=24576)
     parser.add_argument("--logit-chunk-size", type=int, default=128)
+    parser.add_argument("--adapter-path", help="Frozen local PEFT adapter directory")
+    parser.add_argument("--adapter-sha256", help="Pinned adapter config/weight digest")
+    parser.add_argument(
+        "--verify-revision",
+        action="store_true",
+        help="Require matching local HF base provenance",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if bool(args.adapter_path) != bool(args.adapter_sha256):
+        raise ValueError(
+            "--adapter-path and --adapter-sha256 must be supplied together"
+        )
+    if args.verify_revision:
+        validate_local_model_revision(args.model_path, args.revision)
 
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -140,13 +157,18 @@ def main() -> None:
         local_files_only=True,
         trust_remote_code=False,
     )
+    if args.adapter_path:
+        model = load_frozen_adapter(model, args.adapter_path, args.adapter_sha256)
     teacher = FrozenTokenTeacher(
         model=model,
         tokenizer=tokenizer,
         model_id=args.model_id,
         revision=args.revision,
+        revision_verified=args.verify_revision,
         max_length=args.max_length,
         logit_chunk_size=args.logit_chunk_size,
+        adapter_path=args.adapter_path,
+        adapter_sha256=args.adapter_sha256,
     )
     server = create_server(teacher, host=args.host, port=args.port)
     print(
