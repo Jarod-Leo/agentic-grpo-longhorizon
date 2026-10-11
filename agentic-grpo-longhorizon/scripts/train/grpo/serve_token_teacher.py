@@ -18,6 +18,58 @@ from src.models.token_teacher import (
 MAX_REQUEST_BYTES = 16 * 1024 * 1024
 
 
+def check_teacher_scoring(teacher: FrozenTokenTeacher) -> dict[str, float]:
+    """Check causal alignment and prefix sensitivity on the loaded GPU model."""
+    import torch
+
+    tokenizer = teacher.tokenizer
+    prompt = tokenizer.encode(
+        "Check the current reservation before changing a flight.\n",
+        add_special_tokens=False,
+    )
+    response = tokenizer.encode(
+        "I will check the reservation details first.", add_special_tokens=False
+    )
+    prefix = tokenizer.encode(
+        "[TRAINING SKILL START]\nRead the booking and obtain confirmation.\n[TRAINING SKILL END]\n",
+        add_special_tokens=False,
+    )
+    device = next(teacher.model.parameters()).device
+    mask = [1] * len(response)
+    mask[-1] = 0
+    results = []
+    errors = []
+    for context in (prompt, prefix + prompt):
+        ids = context + response
+        request = {
+            "input_ids": ids,
+            "response_start": len(context),
+            "response_mask": mask,
+            "tokenizer_fingerprint": teacher.tokenizer_fingerprint,
+            "policy_version": 0,
+            "adapter_path": teacher.adapter_path,
+            "adapter_sha256": teacher.adapter_sha256,
+        }
+        scored = torch.tensor(
+            teacher.score(request)["teacher_log_probs"], device=device
+        )
+        tokens = torch.tensor([ids], device=device)
+        with torch.inference_mode():
+            logits = teacher.model(
+                input_ids=tokens, use_cache=False, return_dict=True
+            ).logits
+            expected = logits[0, len(context) - 1 : -1].float().log_softmax(-1)
+            expected = expected.gather(-1, tokens[0, len(context) :, None]).squeeze(-1)
+            expected *= torch.tensor(mask, device=device)
+        torch.testing.assert_close(scored, expected, rtol=1e-5, atol=1e-5)
+        errors.append((scored - expected).abs().max().item())
+        results.append(scored)
+    difference = (results[1] - results[0]).abs().max().item()
+    if difference <= 1e-6:
+        raise RuntimeError("Teacher self-check found no response to the skill prefix")
+    return {"max_alignment_error": max(errors), "prefix_max_logprob_delta": difference}
+
+
 def make_handler(teacher: FrozenTokenTeacher) -> type[BaseHTTPRequestHandler]:
     class TokenTeacherHandler(BaseHTTPRequestHandler):
         server_version = "TokenTeacher/1"
@@ -121,6 +173,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adapter-path", help="Frozen local PEFT adapter directory")
     parser.add_argument("--adapter-sha256", help="Pinned adapter config/weight digest")
     parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="Check scoring before accepting training requests",
+    )
+    parser.add_argument(
         "--verify-revision",
         action="store_true",
         help="Require matching local HF base provenance",
@@ -170,6 +227,12 @@ def main() -> None:
         adapter_path=args.adapter_path,
         adapter_sha256=args.adapter_sha256,
     )
+    if args.self_check:
+        print(
+            "TEACHER_SCORING_CHECK",
+            json.dumps(check_teacher_scoring(teacher)),
+            flush=True,
+        )
     server = create_server(teacher, host=args.host, port=args.port)
     print(
         json.dumps(

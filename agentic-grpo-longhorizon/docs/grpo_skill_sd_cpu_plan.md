@@ -2,7 +2,7 @@
 
 更新：2026-10-11，多候选 + UCB 修订。方法配置：`qwen3_grpo_skill_sd`；产物目录：`experiments/grpo_skill_sd/`。
 
-本轮范围：完成方案、代码、真实 E01 成功轨迹收集和 CPU 验证。**不提交 GPU 作业，不调用真实 MiMo 提取技能，不声称已完成训练或取得新成功率。** 200 步等参数是后续训练的默认方案，并非本轮启动授权。
+初始阶段仅做方案、代码、真实 E01 成功轨迹收集和 CPU 验证。2026-10-11 用户进一步授权开始 GPU 训练：先真实 MiMo 提取和短 GPU 验证，通过后执行 200 步正式实验。具体提交与验收结果见第 10 节；历史 CPU 记录和冻结快照保留。
 
 ## 1. 研究问题与论文关系
 
@@ -265,3 +265,15 @@ CPU 作业 **198361** 已完成：`COMPLETED / 0:0`，耗时 **1 分 45 秒**，
 验证包括：历史 corpus-v1 逐轨迹提取与缓存恢复、候选去重、UCB 先试未试及公式、每任务组一次计数、失败提交原子性、重复及重排的整组 skill 对齐、原始 outcome 与 shaped reward 隔离、真实 trainer 保存/恢复 hook、临时目录中的归档和 SSD symlink、缺失/错步/错 bank/split/config 状态拒绝、恢复后下一选择一致。实际文件和模型的 GPU 保存恢复仍未运行。
 
 证据目录：`experiments/grpo_skill_sd/ucb-cpu-validation-v1/`；其中 `slurm-198361.out` 为完整输出，`distillation-tests.xml` 为蒸馏测试报告，各 `*-input/run.json` 为配置元信息。汇总：`experiments/grpo_skill_sd/ucb_cpu_validation.json`；冻结源码：`source-ucb-cpu-v1/`。本轮未调用真实 MiMo，未生成正式 skill bank。
+
+## 10. GPU 执行阶段（2026-10-11）
+
+用户授权开始实际训练。配置沿用 200 步、seed 42、4 任务 × 8 轨迹、每 50 步保存完整 checkpoint 到 HDD、每 100 步独立评测 train。学生为 base Qwen3-8B + 新 LoRA；教师为冻结 E01 step200 adapter + UCB 选中 skill；损失系数、训练/测试划分和成功判定保持上文定义。正式训练启用既有 W&B project/entity；API key 由现有凭据文件注入，不写入提交记录。
+
+启动前实时核对 account/qos、分区、GPU 型号、同节点双卡约束、账户额度及存储。MSC 允许最多 2 块 Pro6000；SSD 61.7/150 GB、HDD 236.8/400 GB。现有集群官方摘要链接返回 404，本次遵循项目内集群规则并以实时 Slurm 配置为准。
+
+真实提取初次 CPU 作业 198378：API 请求完成且 finish_reason=stop，但返回值不能直接解析为 JSON，作业安全停止，未写正式 bank、未启动 GPU。原请求未保存 raw，不能进一步断言是 Markdown 包装或其他格式。修复仅在提取调用开启 [MiMo 官方 JSON 模式](https://mimo.mi.com/docs/en-US/quick-start/usage-guide/text-generation/structured-output)，普通用户模拟器调用不变；保留拒绝响应审计并纳入缓存请求身份。
+
+GPU 验证复用共用 teacher_pair/smoke 入口：教师加载后以短序列核对普通与 skill 前缀评分均与相同权重的 dense log-softmax 对齐，并确认 prefix 能改变分布；此检查不证明技能提升任务成功率。学生完成 step1 更新、checkpoint 归档，再从该检查点恢复执行 step2，核对 optimizer/scheduler/RNG 和 UCB 的计数及奖励状态。正式任务只在 smoke/恢复验收成功后启动；使用独立输出和归档目录从 base 开始。
+
+统一 CPU 预检 **198398** 通过：共用105项 + 蒸馏149项 = **254项**，五组配置和真实模型/tokenizer/adapter身份通过。冻结代码 `source-gpu-v1/`，报告 `gpu_preflight_cpu_validation.json`。首次修复回归198395发现新增自检测试函数位置错误，已修正，依赖提取198396未调用API即取消。正式候选提取由CPU作业 **198399** 执行，输出 `extract-mimo-v3/skills.json`；JSON模式和候选长度校验已实际通过首批响应。

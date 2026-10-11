@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections import Counter
+import sys
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import torch
@@ -137,12 +138,142 @@ def check_single_run(run: Path, expected_lora_sha256: str | None = None) -> dict
     return report
 
 
+def check_selector_resume(source: Path, restored: Path, run: Path, meta: dict) -> dict:
+    """Replay the resumed outcome groups through the shared task selector."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from src.training.skill_bank import load_skill_bank
+    from src.training.skill_selector import TaskSkillSelector
+
+    teacher = meta["distillation"]["teacher"]
+    initial, final = (
+        load_json(source / "skill_selector.json"),
+        load_json(restored / "skill_selector.json"),
+    )
+    for state, step in ((initial, 1), (final, 2)):
+        assert state["version"] == "skill-selector-checkpoint-v1"
+        assert state["global_step"] == state["selector"]["last_step"] == step
+    bank = load_skill_bank(
+        teacher["skill_bank_path"], teacher["skill_bank_sha256"], teacher["split_path"]
+    )
+    selector = TaskSkillSelector(
+        bank,
+        bank_sha256=teacher["skill_bank_sha256"],
+        split_sha256=meta["split_sha256"],
+        exploration_coef=teacher["ucb_exploration_coef"],
+        mode=teacher["skill_selection"],
+    )
+    selector.load_state_dict(initial["selector"])
+    outcomes = defaultdict(list)
+    for line in (run / "eval_trajectories.jsonl").read_text().splitlines():
+        row = json.loads(line)
+        if row["validate"] is False and row["step"] == 2:
+            assert row["split"] == "train" and row["score"] in (0, 1)
+            outcomes[row["task_id"]].append(row["score"])
+    audit_path = Path(
+        teacher.get("selection_log_path") or run / "skill_selection.jsonl"
+    )
+    audit = [
+        json.loads(line) for line in audit_path.read_text().splitlines() if line.strip()
+    ]
+    records = {row["task_id"]: row for row in audit}
+    assert outcomes and len(records) == len(audit) and records.keys() == outcomes.keys()
+    selector.select(outcomes, 2)
+    expected_audit = selector.commit(dict(outcomes), 2)
+    for expected in expected_audit:
+        record = records[expected["task_id"]]
+        assert (
+            record["global_step"] == 2
+            and record["slurm_job_id"] == meta["slurm_job_id"]
+        )
+        assert all(record.get(key) == value for key, value in expected.items()), (
+            "Resume skill audit differs from restored selection/outcomes"
+        )
+    assert selector.state_dict() == final["selector"], (
+        "Resume selector state is not step-1 state plus outcome-group commits"
+    )
+    return {
+        "skill_selector_resume_verified": True,
+        "skill_selector_reward_groups": len(records),
+    }
+
+
+def check_resumed_run(first_run: Path, resume_run: Path) -> dict:
+    """Verify one saved update and one independent resumed update through step two."""
+    first, resume = [load_json(run / "summary.json") for run in (first_run, resume_run)]
+    assert first["accepted"] and resume["accepted"], "Run completeness failed"
+    first_meta, meta = first["metadata"], resume["metadata"]
+    assert first_meta["mode"] == meta["mode"] == "train"
+    assert first_meta["start_step"] == 0 and first_meta["total_steps"] == 1
+    assert meta["start_step"] == 1 and meta["total_steps"] == 2
+    source = Path(first_meta["checkpoint_root"]) / "global_step_1"
+    checkpoint = Path(meta["checkpoint_root"]) / "global_step_2"
+    assert Path(meta["resume_from"]).resolve() == source.resolve()
+    checks = check_checkpoint(checkpoint, 2)
+    assert checks["lora_b_nonzero"] > 0, "Resumed LoRA is still zero"
+    log = (resume_run / "run.log").read_text(errors="replace")
+    for marker in (
+        "Setting global step to 1",
+        "Loaded model from",
+        "Loaded optimizer from",
+        "Loaded rng from",
+        "Loaded lr_scheduler from",
+    ):
+        assert marker in log, f"Missing resume evidence: {marker}"
+    checks["checkpoint_restore_verified"] = True
+    if meta.get("checkpoint_archive_root"):
+        expected = Path(meta["checkpoint_archive_root"]) / "global_step_2"
+        assert (
+            checkpoint.is_symlink()
+            and checkpoint.resolve() == expected.resolve()
+            and expected.is_dir()
+        )
+        checks["hdd_archive_verified"] = True
+
+    def uses_selector(metadata: dict) -> bool:
+        distillation = metadata.get("distillation", {})
+        actor, teacher = (
+            distillation.get("actor", {}),
+            distillation.get("teacher") or {},
+        )
+        return bool(
+            actor.get("enabled")
+            and actor.get("coef", 0) > 0
+            and teacher.get("use_skills")
+            and teacher.get("state_manager")
+        )
+
+    assert uses_selector(first_meta) == uses_selector(meta), (
+        "Selector activation changed during resume"
+    )
+    if uses_selector(meta):
+        checks.update(check_selector_resume(source, checkpoint, resume_run, meta))
+    return {
+        "operational_checks_passed": True,
+        "resume_verified": True,
+        "learning_signal_verified": first["learning"]["signal_observed"]
+        and checks["lora_b_nonzero"] > 0,
+        "checks": checks,
+        "resume_from": str(source),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
-    parser.add_argument("--single-run", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--single-run", action="store_true")
+    mode.add_argument(
+        "--resume-run", type=Path, help="Check a separate step-1 to step-2 resume smoke"
+    )
     parser.add_argument("--expected-lora-sha256")
     args = parser.parse_args()
+    if args.resume_run is not None:
+        report = check_resumed_run(args.root, args.resume_run)
+        (args.resume_run / "readiness.json").write_text(
+            json.dumps(report, indent=2) + "\n"
+        )
+        print("READINESS", json.dumps(report))
+        return
     if args.single_run:
         report = check_single_run(args.root, args.expected_lora_sha256)
         (args.root / "readiness.json").write_text(json.dumps(report, indent=2) + "\n")

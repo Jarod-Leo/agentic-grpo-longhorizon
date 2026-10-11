@@ -222,7 +222,9 @@ def extract_skill_bank(
         raise ValueError("Extraction input hash mismatch")
     if output_path.exists():
         raise FileExistsError(output_path)
+    response_format = getattr(client, "response_format", None)
     cache_path = output_path.with_suffix(".responses.jsonl")
+    rejected_path = output_path.with_suffix(".rejected.jsonl")
     cache = {}
     if cache_path.exists():
         for line in cache_path.read_text().splitlines():
@@ -263,6 +265,8 @@ def extract_skill_bank(
                     },
                 ]
                 request_identity = {"messages": messages, "model": client.model}
+                if response_format is not None:
+                    request_identity["response_format"] = response_format
                 request_hash = hashlib.sha256(json.dumps(request_identity, sort_keys=True).encode()).hexdigest()
                 fields = cache.get(request_hash)
                 if fields is None:
@@ -270,9 +274,29 @@ def extract_skill_bank(
                         messages,
                         trajectory_id=f"skill-extract-task-{task['task_id']}-{trajectory_id}",
                     )
-                    fields = validate_skill(json.loads(raw))
-                    if len(tokenizer.encode(render_skill(fields), add_special_tokens=False)) > max_skill_tokens:
-                        raise ValueError(f"Task {task['task_id']} skill exceeds {max_skill_tokens} teacher tokens")
+                    try:
+                        fields = validate_skill(json.loads(raw))
+                        if len(tokenizer.encode(render_skill(fields), add_special_tokens=False)) > max_skill_tokens:
+                            raise ValueError(f"Task {task['task_id']} skill exceeds {max_skill_tokens} teacher tokens")
+                    except ValueError as exc:
+                        # Only record successful API replies rejected locally;
+                        # SDK exceptions and request credentials never enter this file.
+                        with rejected_path.open("a") as target:
+                            target.write(
+                                json.dumps(
+                                    {
+                                        "task_id": task["task_id"],
+                                        "source_trajectory_id": trajectory_id,
+                                        "request_sha256": request_hash,
+                                        "raw": raw,
+                                        "error_type": type(exc).__name__,
+                                        "error": str(exc),
+                                    },
+                                    ensure_ascii=False,
+                                )
+                                + "\n"
+                            )
+                        raise
                     with cache_path.open("a") as target:
                         target.write(
                             json.dumps(
@@ -333,6 +357,8 @@ def extract_skill_bank(
         "retained_candidates_per_task": {str(t): retained_per_task[t] for t in manifest["train_task_ids"]},
         "skills": skills,
     }
+    if response_format is not None:
+        bank["provenance"]["response_format"] = response_format
     with output_path.open("x") as target:
         target.write(json.dumps(bank, ensure_ascii=False, indent=2) + "\n")
     return bank

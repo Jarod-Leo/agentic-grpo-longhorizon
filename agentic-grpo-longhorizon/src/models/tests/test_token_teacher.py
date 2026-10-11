@@ -352,11 +352,57 @@ def test_teacher_is_frozen_and_kept_in_eval_mode(teacher: FrozenTokenTeacher) ->
     assert all(
         parameter.requires_grad is False for parameter in teacher.model.parameters()
     )
-
     teacher.model.train()
     teacher.score(request_for(teacher, [1, 2, 3], [1]))
     assert teacher.model.training is False
     assert teacher.model.training_states[-1] is False
+
+
+def test_loaded_teacher_scoring_self_check() -> None:
+    check = runpy.run_path(
+        str(
+            Path(__file__).resolve().parents[3]
+            / "scripts/train/grpo/serve_token_teacher.py"
+        )
+    )["check_teacher_scoring"]
+    torch.manual_seed(7)
+    config = Qwen3Config(
+        vocab_size=12,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+        max_position_embeddings=128,
+        attention_dropout=0.0,
+        use_cache=False,
+    )
+    config._attn_implementation = "eager"
+    tokenizer = TinyTokenizer()
+    tokenizer.encode = lambda text, **kwargs: [
+        sum(word.encode()) % 8 for word in text.split()
+    ]
+    teacher = FrozenTokenTeacher(
+        model=Qwen3ForCausalLM(config),
+        tokenizer=tokenizer,
+        model_id="test/self-check",
+        revision="seed-7",
+        max_length=128,
+    )
+    report = check(teacher)
+    assert report["max_alignment_error"] < 1e-5
+    assert report["prefix_max_logprob_delta"] > 1e-6
+    original = teacher.score
+
+    def wrong_alignment(request):
+        result = original(request)
+        result["teacher_log_probs"][0] += 0.1
+        return result
+
+    teacher.score = wrong_alignment
+    with pytest.raises(AssertionError):
+        check(teacher)
 
 
 def test_fingerprint_covers_vocab_special_tokens_and_chat_template() -> None:

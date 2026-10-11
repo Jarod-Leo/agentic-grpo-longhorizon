@@ -23,7 +23,7 @@ cd "$REPO"
 if [ "$SLURM_PROCID" = 1 ]; then
     teacher_args=()
     if [ "$QWEN3_CONFIG" = qwen3_grpo_skill_sd ]; then
-        teacher_args+=(--verify-revision)
+        teacher_args+=(--verify-revision --self-check)
     fi
     if [ -n "$TEACHER_ADAPTER_PATH" ]; then
         : "${TEACHER_ADAPTER_SHA256:?Set the pinned teacher adapter SHA256}"

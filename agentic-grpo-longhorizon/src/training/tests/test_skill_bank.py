@@ -234,3 +234,76 @@ def test_bank_v2_retains_distinct_candidates_and_v1_loads_single_candidate_lists
     legacy.write_text(json.dumps(bank))
     with pytest.raises(ValueError, match="globally unique"):
         load_skill_bank(legacy, file_sha256(legacy), split)
+
+
+def test_response_format_changes_request_cache_identity_and_records_provenance(tmp_path):
+    source, split = make_source(tmp_path)
+    output = tmp_path / "corpus"
+    collect_successful_trajectories(source, split, output)
+    manifest = output / "manifest.json"
+    bank_path = output / "skills.json"
+    with pytest.raises(RuntimeError, match="Mock network"):
+        extract_skill_bank(manifest, FakeMimo(fail_on=1), WordTokenizer(), bank_path)
+    cache_path = bank_path.with_suffix(".responses.jsonl")
+    previous = [json.loads(line)["request_sha256"] for line in cache_path.read_text().splitlines()]
+    client = FakeMimo()
+    client.response_format = {"type": "json_object"}
+
+    bank = extract_skill_bank(manifest, client, WordTokenizer(), bank_path)
+
+    assert len(client.calls) == 6
+    cached = [json.loads(line)["request_sha256"] for line in cache_path.read_text().splitlines()]
+    assert cached[:3] == previous
+    assert set(previous).isdisjoint(cached[3:])
+    assert bank["provenance"]["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.parametrize(
+    ("raw", "budget", "error"),
+    [
+        ('```json\n{"success_analysis": "Verify."}\n```', 512, "Expecting value"),
+        ("{}", 512, "exactly the three skill fields"),
+        (
+            '{"success_analysis": "Verify.", "mistake_analysis": "None.", "golden_workflow": "Read and confirm."}',
+            1,
+            "exceeds",
+        ),
+    ],
+)
+def test_rejected_response_preserves_raw_diagnostics_and_raises(tmp_path, raw, budget, error):
+    class RejectedMimo(FakeMimo):
+        def complete(self, messages, trajectory_id):
+            super().complete(messages, trajectory_id)
+            return raw, None
+
+    source, split = make_source(tmp_path)
+    output = tmp_path / "corpus"
+    collect_successful_trajectories(source, split, output)
+    bank_path = output / "skills.json"
+    with pytest.raises(ValueError, match=error) as caught:
+        extract_skill_bank(output / "manifest.json", RejectedMimo(), WordTokenizer(), bank_path, budget)
+
+    rows = [json.loads(line) for line in bank_path.with_suffix(".rejected.jsonl").read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["task_id"] == 0
+    assert rows[0]["source_trajectory_id"] == "train-0"
+    assert len(rows[0]["request_sha256"]) == 64
+    assert rows[0]["raw"] == raw
+    assert rows[0]["error"] == str(caught.value)
+    assert rows[0]["error_type"] == type(caught.value).__name__
+    assert not bank_path.exists()
+    assert not bank_path.with_suffix(".responses.jsonl").exists()
+
+
+def test_sdk_exceptions_are_not_written_to_rejected_responses(tmp_path):
+    class SDKFailureMimo(FakeMimo):
+        def complete(self, messages, trajectory_id):
+            raise ValueError("private-provider-error api-key=DO_NOT_LOG")
+
+    source, split = make_source(tmp_path)
+    output = tmp_path / "corpus"
+    collect_successful_trajectories(source, split, output)
+    bank_path = output / "skills.json"
+    with pytest.raises(ValueError):
+        extract_skill_bank(output / "manifest.json", SDKFailureMimo(), WordTokenizer(), bank_path)
+    assert not bank_path.with_suffix(".rejected.jsonl").exists()

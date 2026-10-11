@@ -45,20 +45,12 @@ class RateLimiter:
                 now = time.monotonic()
                 while self.starts and self.starts[0] <= now - self.window:
                     self.starts.popleft()
-                self.tokens = [
-                    r
-                    for r in self.tokens
-                    if r["end"] is None or r["end"] > now - self.window
-                ]
+                self.tokens = [r for r in self.tokens if r["end"] is None or r["end"] > now - self.window]
                 delay = max(0.0, self.next_start - now, self.cooldown - now)
                 if len(self.starts) >= self.rpm:
                     delay = max(delay, self.starts[0] + self.window - now)
                 if sum(r["tokens"] for r in self.tokens) + reservation > self.tpm:
-                    expiry = [
-                        r["end"] + self.window
-                        for r in self.tokens
-                        if r["end"] is not None
-                    ]
+                    expiry = [r["end"] + self.window for r in self.tokens if r["end"] is not None]
                     delay = max(delay, min(expiry) - now if expiry else 0.05)
                 if delay <= 0:
                     ticket = {"tokens": reservation, "end": None}
@@ -84,16 +76,11 @@ class MimoClient:
     def __init__(self, config, sdk=None):
         self.model = config.get("user_model", "mimo-v2.5")
         self.max_tokens = int(config.get("max_completion_tokens", 1024))
-        self.limiter = RateLimiter(
-            config.get("rpm", 100), config.get("tpm", 10_000_000)
-        )
+        self.response_format = config.get("response_format")
+        self.limiter = RateLimiter(config.get("rpm", 100), config.get("tpm", 10_000_000))
         self.slots = threading.BoundedSemaphore(config.get("max_inflight", 32))
         self.log_lock = threading.Lock()
-        self.path = (
-            Path(os.environ["MIMO_METRICS_PATH"])
-            if os.environ.get("MIMO_METRICS_PATH")
-            else None
-        )
+        self.path = Path(os.environ["MIMO_METRICS_PATH"]) if os.environ.get("MIMO_METRICS_PATH") else None
         self.requests = 0
         self.wait_seconds = 0.0
         self.fatal = threading.Event()
@@ -135,9 +122,7 @@ class MimoClient:
                 try:
                     return max(
                         0.0,
-                        (
-                            parsedate_to_datetime(raw) - datetime.now(timezone.utc)
-                        ).total_seconds(),
+                        (parsedate_to_datetime(raw) - datetime.now(timezone.utc)).total_seconds(),
                     )
                 except (TypeError, ValueError):
                     pass
@@ -145,9 +130,7 @@ class MimoClient:
 
     def complete(self, messages, trajectory_id):
         # UTF-8 bytes plus generous per-message framing bound the text token count.
-        reservation = len(
-            json.dumps(messages, ensure_ascii=False).encode("utf-8")
-        ) + 256 * len(messages)
+        reservation = len(json.dumps(messages, ensure_ascii=False).encode("utf-8")) + 256 * len(messages)
         reservation += self.max_tokens
         with self.slots:
             for attempt in range(4):
@@ -167,6 +150,9 @@ class MimoClient:
                 content_chars = None
                 response_received = False
                 try:
+                    request_options = {}
+                    if self.response_format is not None:
+                        request_options["response_format"] = self.response_format
                     response = self.sdk.chat.completions.create(
                         model=self.model,
                         messages=messages,
@@ -175,14 +161,13 @@ class MimoClient:
                         max_completion_tokens=self.max_tokens,
                         stream=False,
                         extra_body={"thinking": {"type": "disabled"}},
+                        **request_options,
                     )
                     response_received = True
                     status = 200
                     # MiMo documents usage as optional; it is accounting, not dialogue validity.
                     usage_object = getattr(response, "usage", None)
-                    usage = (
-                        usage_object.model_dump() if usage_object is not None else None
-                    )
+                    usage = usage_object.model_dump() if usage_object is not None else None
                     if usage is not None and any(
                         type(usage.get(key)) is not int or usage[key] < 0
                         for key in (
@@ -200,11 +185,7 @@ class MimoClient:
                     content = getattr(getattr(choice, "message", None), "content", None)
                     content_chars = len(content) if isinstance(content, str) else None
                     if finish_reason != "stop":
-                        reason = (
-                            "content_filter"
-                            if finish_reason == "content_filter"
-                            else "unexpected_finish_reason"
-                        )
+                        reason = "content_filter" if finish_reason == "content_filter" else "unexpected_finish_reason"
                         raise MimoResponseError(
                             reason,
                             retryable=finish_reason
@@ -219,9 +200,7 @@ class MimoClient:
                         raise MimoResponseError("empty_or_nontext_content")
                 except Exception as exc:  # noqa: BLE001 - sanitize SDK errors and abort the entire rollout batch
                     status = getattr(exc, "status_code", status)
-                    retryable = status == 429 or (
-                        isinstance(status, int) and status >= 500
-                    )
+                    retryable = status == 429 or (isinstance(status, int) and status >= 500)
                     retryable |= type(exc).__name__ in {
                         "APIConnectionError",
                         "APITimeoutError",
@@ -229,21 +208,20 @@ class MimoClient:
                     if isinstance(exc, MimoResponseError):
                         retryable = exc.retryable
                     error_type = type(exc).__name__
-                    error_reason = (
-                        exc.reason if isinstance(exc, MimoResponseError) else error_type
-                    )
+                    error_reason = exc.reason if isinstance(exc, MimoResponseError) else error_type
                     retry = retryable and attempt < 3
                     # Never include raw SDK exception text, request headers, or credentials.
-                    failure = f"MiMo request failed: {error_type}, reason={error_reason}, status={status}, attempt={attempt + 1}"
+                    failure = (
+                        f"MiMo request failed: {error_type}, reason={error_reason}, "
+                        f"status={status}, attempt={attempt + 1}"
+                    )
                     if retry:
                         self.limiter.backoff(self._retry_after(exc, attempt))
                     else:
                         self.fatal.set()
                 finally:
                     actual = usage.get("total_tokens") if usage else None
-                    self.limiter.finish(
-                        ticket, actual if isinstance(actual, int) else None
-                    )
+                    self.limiter.finish(ticket, actual if isinstance(actual, int) else None)
                     self._record(
                         {
                             "trajectory_id": trajectory_id,
@@ -277,8 +255,4 @@ def estimated_cost_usd(usage):
         return None
     cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
     prompt = usage.get("prompt_tokens", 0)
-    return (
-        (prompt - cached) * 0.14
-        + cached * 0.0028
-        + usage.get("completion_tokens", 0) * 0.28
-    ) / 1_000_000
+    return ((prompt - cached) * 0.14 + cached * 0.0028 + usage.get("completion_tokens", 0) * 0.28) / 1_000_000

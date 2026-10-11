@@ -25,13 +25,11 @@ def reply(content="Please cancel it.", finish="stop", usage=True):
                 "message": {"role": "assistant", "content": content},
             }
         ],
-        usage={"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14}
-        if usage
-        else None,
+        usage={"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14} if usage else None,
     )
 
 
-def client_for(tmp_path, monkeypatch, responses):
+def client_for(tmp_path, monkeypatch, responses, config=None):
     calls = []
 
     def create(**kwargs):
@@ -44,22 +42,27 @@ def client_for(tmp_path, monkeypatch, responses):
     path = tmp_path / "api.jsonl"
     monkeypatch.setenv("MIMO_METRICS_PATH", str(path))
     client = MimoClient(
-        {"rpm": 1_000_000},
-        sdk=SimpleNamespace(
-            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
-        ),
+        {"rpm": 1_000_000, **(config or {})},
+        sdk=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),
     )
     monkeypatch.setattr(client, "_retry_after", lambda exc, attempt: 0)
     return client, calls, path
 
 
+@pytest.mark.parametrize("config", [{}, {"response_format": None}, {"response_format": {"type": "json_object"}}])
+def test_response_format_is_optional_and_passed_to_sdk_when_configured(tmp_path, monkeypatch, config):
+    client, calls, _path = client_for(tmp_path, monkeypatch, [reply(content='{"answer": "ok"}')], config)
+    assert client.complete([{"role": "user", "content": "Return JSON."}], "extraction")[0] == '{"answer": "ok"}'
+    if config.get("response_format") is None:
+        assert "response_format" not in calls[0]
+    else:
+        assert calls[0]["response_format"] == {"type": "json_object"}
+
+
 def test_missing_usage_accepts_valid_text_without_resampling(tmp_path, monkeypatch):
     client, calls, path = client_for(tmp_path, monkeypatch, [reply(usage=False)])
     user = MimoUserSimulationEnv(client, "trajectory")
-    assert (
-        user.generate_next_message([{"role": "user", "content": "Cancel?"}])
-        == "Please cancel it."
-    )
+    assert user.generate_next_message([{"role": "user", "content": "Cancel?"}]) == "Please cancel it."
     assert len(calls) == 1 and not client.fatal.is_set()
     assert len(user.messages) == 1
     assert user.get_total_cost() is None
@@ -102,16 +105,12 @@ def test_persistent_invalid_response_aborts_after_four_attempts(tmp_path, monkey
     assert not any(r["success"] for r in rows)
 
 
-def test_content_filter_retries_same_messages_and_appends_only_valid_text(
-    tmp_path, monkeypatch
-):
+def test_content_filter_retries_same_messages_and_appends_only_valid_text(tmp_path, monkeypatch):
     client, calls, path = client_for(
         tmp_path,
         monkeypatch,
         [
-            reply(
-                content="filtered partial text", finish="content_filter", usage=False
-            ),
+            reply(content="filtered partial text", finish="content_filter", usage=False),
             reply(content="Valid user reply."),
         ],
     )
@@ -138,8 +137,7 @@ def test_persistent_content_filter_aborts_after_four_attempts(tmp_path, monkeypa
     client, calls, path = client_for(
         tmp_path,
         monkeypatch,
-        [reply(content="filtered partial text", finish="content_filter", usage=False)]
-        * 4,
+        [reply(content="filtered partial text", finish="content_filter", usage=False)] * 4,
     )
     with pytest.raises(UserSimulatorAPIError, match="reason=content_filter"):
         client.complete([], "trajectory")
@@ -152,9 +150,7 @@ def test_persistent_content_filter_aborts_after_four_attempts(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("status,expected_calls", [(429, 2), (503, 2), (401, 1)])
-def test_http_retries_and_sanitized_diagnostics(
-    tmp_path, monkeypatch, status, expected_calls
-):
+def test_http_retries_and_sanitized_diagnostics(tmp_path, monkeypatch, status, expected_calls):
     error = RuntimeError("private-provider-error api-key=DO_NOT_LOG")
     error.status_code = status
     client, calls, path = client_for(tmp_path, monkeypatch, [error, reply()])
