@@ -1,0 +1,24 @@
+# Experiment B: outcome-only GRPO with bounded DAPO-style group filtering.
+hydra:
+  searchpath:
+    - pkg://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - qwen3_common
+  - qwen3_performance
+  - _self_
+
+algorithm:
+  filter_groups:
+    enable: true
+    metric: outcome_reward
+    max_num_gen_batches: 3
+    trajectory_budget: 6400
+
+trainer:
+  total_epochs: 20
+  total_training_steps: 200
+  save_freq: 50
+  test_freq: 100
+  checkpoint_archive_dir: ${oc.env:CHECKPOINT_ARCHIVE_ROOT}

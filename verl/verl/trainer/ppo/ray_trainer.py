@@ -43,6 +43,12 @@ from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.config import AlgoConfig
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
+from verl.trainer.ppo.dynamic_sampling import (
+    DynamicSamplingState,
+    can_generate_batch,
+    filter_mixed_groups,
+    sampling_metrics,
+)
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
@@ -342,6 +348,24 @@ class RayPPOTrainer:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
+        self.dynamic_sampling_state = DynamicSamplingState()
+
+        filter_config = self.config.algorithm.get("filter_groups")
+        if filter_config and filter_config.get("enable", False):
+            if self.resource_pool_manager.get_n_gpus() != 1:
+                raise ValueError("dynamic sampling currently supports the validated single-GPU setup only")
+            if self.config.algorithm.adv_estimator != AdvantageEstimator.GRPO:
+                raise ValueError("dynamic sampling currently supports plain GRPO only")
+            if self.use_critic or self.use_rm or self.use_reference_policy:
+                raise ValueError("dynamic sampling currently supports single-policy rule-reward GRPO only")
+            if self.config.algorithm.use_kl_in_reward:
+                raise ValueError("dynamic sampling currently requires the plain outcome-reward GRPO objective")
+            if self.config.reward_model.launch_reward_fn_async:
+                raise ValueError("dynamic sampling currently requires synchronous rule reward")
+            if filter_config.get("max_num_gen_batches", 0) <= 0:
+                raise ValueError("dynamic sampling requires a positive max_num_gen_batches")
+            if not filter_config.get("metric"):
+                raise ValueError("dynamic sampling requires algorithm.filter_groups.metric")
 
     def _get_distillation_state(self):
         """Instantiate optional state only for active skill distillation."""
@@ -967,6 +991,13 @@ class RayPPOTrainer:
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
 
+        filter_config = self.config.algorithm.get("filter_groups")
+        if filter_config and filter_config.get("enable", False):
+            self.dynamic_sampling_state.global_step = self.global_steps
+            state_path = os.path.join(local_global_step_folder, "dynamic_sampling.json")
+            with open(state_path, "w") as f:
+                json.dump(self.dynamic_sampling_state.to_dict(), f, indent=2)
+
         manager = self._get_distillation_state()
         if manager is not None:
             manager.save_checkpoint(local_global_step_folder, self.global_steps)
@@ -1052,6 +1083,16 @@ class RayPPOTrainer:
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
+        filter_config = self.config.algorithm.get("filter_groups")
+        if filter_config and filter_config.get("enable", False):
+            state_path = os.path.join(global_step_folder, "dynamic_sampling.json")
+            if not os.path.isfile(state_path):
+                raise ValueError("Dynamic-sampling resume requires dynamic_sampling.json from the matching checkpoint")
+            with open(state_path) as f:
+                self.dynamic_sampling_state = DynamicSamplingState.from_dict(json.load(f))
+            if self.dynamic_sampling_state.global_step != self.global_steps:
+                raise ValueError("Dynamic-sampling state does not match checkpoint global step")
+
     def _start_profiling(self, do_profile: bool) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
         if do_profile:
@@ -1073,6 +1114,165 @@ class RayPPOTrainer:
                 self.critic_wg.stop_profile()
             if self.use_rm:
                 self.rm_wg.stop_profile()
+
+    def _training_batches(self):
+        """Yield one stateful dataloader stream across configured epochs."""
+        for epoch in range(self.config.trainer.total_epochs):
+            for batch_dict in self.train_dataloader:
+                yield epoch, batch_dict
+
+    def _generate_and_score_training_batch(self, batch_dict, timing_raw, sampling_round=1):
+        """Generate and score one prompt batch without computing policy log-probs."""
+        batch = DataProto.from_single_dict(batch_dict)
+        self._prepare_distillation(batch)
+        batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
+
+        gen_batch = self._get_gen_batch(batch)
+        gen_batch.meta_info["global_steps"] = self.global_steps
+        gen_batch_output = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+
+        with marked_timer("gen", timing_raw, color="red"):
+            if not self.async_rollout_mode:
+                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
+            else:
+                gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+            for name, duration in gen_batch_output.meta_info["timing"].items():
+                timing_raw[name] = timing_raw.get(name, 0) + duration
+            gen_batch_output.meta_info.pop("timing", None)
+
+        if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
+            if self.reward_fn is None:
+                raise ValueError("A reward_fn is required for REMAX advantage estimation.")
+            with marked_timer("gen_max", timing_raw, color="purple"):
+                gen_baseline_batch = deepcopy(gen_batch)
+                gen_baseline_batch.meta_info["do_sample"] = False
+                if not self.async_rollout_mode:
+                    gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
+                else:
+                    gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
+                baseline_batch = deepcopy(batch).union(gen_baseline_output)
+                rm_scores = None
+                if self.use_rm and "rm_scores" not in baseline_batch.batch.keys():
+                    rm_scores = self.rm_wg.compute_rm_score(baseline_batch)
+                    baseline_batch = baseline_batch.union(rm_scores)
+                reward_baseline_tensor, _ = compute_reward(baseline_batch, self.reward_fn)
+                reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
+                batch.batch["reward_baselines"] = reward_baseline_tensor
+                del rm_scores, gen_baseline_batch, gen_baseline_output, baseline_batch
+
+        batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+        batch = batch.union(gen_batch_output)
+        if "response_mask" not in batch.batch.keys():
+            batch.batch["response_mask"] = compute_response_mask(batch)
+
+        with marked_timer("reward", timing_raw, color="yellow"):
+            if self.use_rm and "rm_scores" not in batch.batch.keys():
+                reward_tensor = self.rm_wg.compute_rm_score(batch)
+                batch = batch.union(reward_tensor)
+            if self.config.reward_model.launch_reward_fn_async:
+                future_reward = compute_reward_async.remote(data=batch, config=self.config, tokenizer=self.tokenizer)
+                reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
+            else:
+                reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+
+        batch.batch["token_level_scores"] = reward_tensor
+        if reward_extra_infos_dict:
+            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+        return batch, reward_extra_infos_dict
+
+    def _dynamic_metric(self, batch: DataProto, metric_name: str) -> np.ndarray:
+        if metric_name == "seq_final_reward":
+            rewards = batch.batch.get("token_level_rewards", batch.batch["token_level_scores"])
+            return rewards.sum(dim=-1).cpu().numpy()
+        if metric_name == "seq_reward":
+            return batch.batch["token_level_scores"].sum(dim=-1).cpu().numpy()
+        if metric_name not in batch.non_tensor_batch:
+            raise KeyError(
+                f"dynamic-sampling metric {metric_name!r} is absent; available reward fields: "
+                f"{sorted(batch.non_tensor_batch)}"
+            )
+        return np.asarray(batch.non_tensor_batch[metric_name])
+
+    def _collect_dynamic_training_batch(self, first_batch_dict, training_stream, timing_raw):
+        config = self.config.algorithm.filter_groups
+        rollout_n = self.config.actor_rollout_ref.rollout.n
+        target_groups = self.config.data.train_batch_size
+        max_gen_batches = config.max_num_gen_batches
+        trajectory_budget = config.get("trajectory_budget", 0)
+        expected_batch_size = self.config.data.get("gen_batch_size", target_groups) * rollout_n
+
+        retained_batches = []
+        reward_extra_keys = set()
+        generated_this_step = 0
+        generated_groups = 0
+        mixed_groups = 0
+        num_gen_batches = 0
+        next_batch_dict = first_batch_dict
+        last_epoch = None
+
+        while next_batch_dict is not None and num_gen_batches < max_gen_batches:
+            if not can_generate_batch(self.dynamic_sampling_state, trajectory_budget, expected_batch_size):
+                break
+            num_gen_batches += 1
+            new_batch, reward_extra_infos = self._generate_and_score_training_batch(
+                next_batch_dict, timing_raw, sampling_round=num_gen_batches
+            )
+            batch_size = len(new_batch)
+            self.dynamic_sampling_state.generated_trajectories += batch_size
+            generated_this_step += batch_size
+            reward_extra_keys.update(reward_extra_infos)
+
+            result = filter_mixed_groups(
+                new_batch.non_tensor_batch["uid"],
+                self._dynamic_metric(new_batch, config.metric),
+                expected_group_size=rollout_n,
+            )
+            generated_groups += result.generated_groups
+            mixed_groups += result.mixed_groups
+            if result.kept_indices:
+                retained_batches.append(new_batch[result.kept_indices])
+
+            retained_group_count = sum(len(item) for item in retained_batches) // rollout_n
+            budget_exhausted = trajectory_budget > 0 and (
+                self.dynamic_sampling_state.generated_trajectories >= trajectory_budget
+            )
+            if retained_group_count >= target_groups or budget_exhausted or num_gen_batches >= max_gen_batches:
+                break
+            next_item = next(training_stream, None)
+            if next_item is None:
+                next_batch_dict = None
+            else:
+                last_epoch, next_batch_dict = next_item
+
+        budget_exhausted = trajectory_budget > 0 and (
+            self.dynamic_sampling_state.generated_trajectories >= trajectory_budget
+            or not can_generate_batch(self.dynamic_sampling_state, trajectory_budget, expected_batch_size)
+        )
+        if retained_batches:
+            batch = DataProto.concat(retained_batches)
+            available_groups = len(batch) // rollout_n
+            retained_groups = min(available_groups, target_groups)
+            batch = batch[: retained_groups * rollout_n]
+            reward_extra_infos = {
+                key: batch.non_tensor_batch[key].tolist() for key in reward_extra_keys if key in batch.non_tensor_batch
+            }
+        else:
+            batch = None
+            available_groups = 0
+            retained_groups = 0
+            reward_extra_infos = {}
+
+        step_metrics = sampling_metrics(
+            self.dynamic_sampling_state,
+            generated_this_step=generated_this_step,
+            num_gen_batches=num_gen_batches,
+            generated_groups=generated_groups,
+            mixed_groups=mixed_groups,
+            retained_groups=retained_groups,
+            dropped_excess_groups=max(available_groups - target_groups, 0),
+            budget_exhausted=budget_exhausted,
+        )
+        return batch, reward_extra_infos, step_metrics, budget_exhausted, last_epoch
 
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen", keep_minibatch=False):
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
@@ -1164,102 +1364,41 @@ class RayPPOTrainer:
         )
         next_step_profile = False
 
-        for epoch in range(self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
-                metrics = {}
-                timing_raw = {}
+        filter_config = self.config.algorithm.get("filter_groups")
+        dynamic_enabled = bool(filter_config and filter_config.get("enable", False))
+        training_stream = self._training_batches()
+        for epoch, batch_dict in training_stream:
+            metrics = {}
+            timing_raw = {}
 
-                with marked_timer("start_profile", timing_raw):
-                    self._start_profiling(
-                        not prev_step_profile and curr_step_profile
-                        if self.config.global_profiler.profile_continuous_steps
-                        else curr_step_profile
+            with marked_timer("start_profile", timing_raw):
+                self._start_profiling(
+                    not prev_step_profile and curr_step_profile
+                    if self.config.global_profiler.profile_continuous_steps
+                    else curr_step_profile
+                )
+            is_last_step = self.global_steps >= self.total_training_steps
+            with marked_timer("step", timing_raw):
+                if dynamic_enabled:
+                    batch, reward_extra_infos_dict, sampling_stats, exhausted, consumed_epoch = (
+                        self._collect_dynamic_training_batch(batch_dict, training_stream, timing_raw)
                     )
-                batch: DataProto = DataProto.from_single_dict(batch_dict)
-                self._prepare_distillation(batch)
+                    metrics.update(sampling_stats)
+                    is_last_step = is_last_step or exhausted
+                    if consumed_epoch is not None:
+                        epoch = consumed_epoch
+                else:
+                    batch, reward_extra_infos_dict = self._generate_and_score_training_batch(batch_dict, timing_raw)
 
-                # add uid to batch
-                batch.non_tensor_batch["uid"] = np.array(
-                    [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
-                )
-
-                gen_batch = self._get_gen_batch(batch)
-
-                # pass global_steps to trace
-                gen_batch.meta_info["global_steps"] = self.global_steps
-                gen_batch_output = gen_batch.repeat(
-                    repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
-                )
-
-                is_last_step = self.global_steps >= self.total_training_steps
-                with marked_timer("step", timing_raw):
-                    # generate a batch
-                    with marked_timer("gen", timing_raw, color="red"):
-                        if not self.async_rollout_mode:
-                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
-                        else:
-                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
-
-                        timing_raw.update(gen_batch_output.meta_info["timing"])
-                        gen_batch_output.meta_info.pop("timing", None)
-
-                    if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
-                        if self.reward_fn is None:
-                            raise ValueError("A reward_fn is required for REMAX advantage estimation.")
-
-                        with marked_timer("gen_max", timing_raw, color="purple"):
-                            gen_baseline_batch = deepcopy(gen_batch)
-                            gen_baseline_batch.meta_info["do_sample"] = False
-                            if not self.async_rollout_mode:
-                                gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
-                            else:
-                                gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
-                            batch = batch.union(gen_baseline_output)
-                            # compute reward model score on batch
-                            rm_scores = None
-                            if self.use_rm and "rm_scores" not in batch.batch.keys():
-                                rm_scores = self.rm_wg.compute_rm_score(batch)
-                                batch = batch.union(rm_scores)
-                            reward_baseline_tensor, _ = compute_reward(batch, self.reward_fn)
-                            reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
-
-                            keys_to_pop = set(gen_baseline_output.batch.keys())
-                            if rm_scores is not None:
-                                keys_to_pop.update(rm_scores.batch.keys())
-                            batch.pop(batch_keys=list(keys_to_pop))
-
-                            batch.batch["reward_baselines"] = reward_baseline_tensor
-
-                            del rm_scores, gen_baseline_batch, gen_baseline_output
-                    # repeat to align with repeated responses in rollout
-                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                    batch = batch.union(gen_batch_output)
-
-                    if "response_mask" not in batch.batch.keys():
-                        batch.batch["response_mask"] = compute_response_mask(batch)
-                    # Balance the number of valid tokens across DP ranks.
-                    # NOTE: This usually changes the order of data in the `batch`,
-                    # which won't affect the advantage calculation (since it's based on uid),
-                    # but might affect the loss calculation (due to the change of mini-batching).
+                if batch is None:
+                    self.dynamic_sampling_state.skipped_updates += 1
+                else:
                     if self.config.trainer.balance_batch:
                         self._balance_batch(batch, metrics=metrics)
-
-                    # compute global_valid tokens
+                        reward_extra_infos_dict = {
+                            key: batch.non_tensor_batch[key].tolist() for key in reward_extra_infos_dict
+                        }
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
-
-                    with marked_timer("reward", timing_raw, color="yellow"):
-                        # compute reward model score
-                        if self.use_rm and "rm_scores" not in batch.batch.keys():
-                            reward_tensor = self.rm_wg.compute_rm_score(batch)
-                            batch = batch.union(reward_tensor)
-
-                        if self.config.reward_model.launch_reward_fn_async:
-                            future_reward = compute_reward_async.remote(
-                                data=batch, config=self.config, tokenizer=self.tokenizer
-                            )
-                        else:
-                            reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
-
                     # Operating Mode Selection:
                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
                     # - Decoupled mode: Recomputes old_log_probs as proximal anchor (3 policies: π_rollout, π_old, π_θ)
@@ -1321,13 +1460,6 @@ class RayPPOTrainer:
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
-                        if self.config.reward_model.launch_reward_fn_async:
-                            reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
-                        batch.batch["token_level_scores"] = reward_tensor
-
-                        if reward_extra_infos_dict:
-                            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
-
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
                             batch, kl_metrics = apply_kl_penalty(
@@ -1387,101 +1519,110 @@ class RayPPOTrainer:
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
                         metrics.update(self._commit_distillation(batch))
+                        if dynamic_enabled:
+                            self.dynamic_sampling_state.optimizer_updates += 1
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
 
-                # validate
-                if (
-                    self.val_reward_fn is not None
-                    and self.config.trainer.test_freq > 0
-                    and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
-                ):
-                    with marked_timer("testing", timing_raw, color="green"):
-                        val_metrics: dict = self._validate()
-                        if is_last_step:
-                            last_val_metrics = val_metrics
-                    metrics.update(val_metrics)
+            if dynamic_enabled:
+                self.dynamic_sampling_state.global_step = self.global_steps
+                metrics["dynamic_sampling/optimizer_updates"] = self.dynamic_sampling_state.optimizer_updates
+                metrics["dynamic_sampling/skipped_updates"] = self.dynamic_sampling_state.skipped_updates
 
-                # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
-                esi_close_to_expiration = should_save_ckpt_esi(
-                    max_steps_duration=self.max_steps_duration,
-                    redundant_time=self.config.trainer.esi_redundant_time,
+            # validate
+            if (
+                self.val_reward_fn is not None
+                and self.config.trainer.test_freq > 0
+                and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
+            ):
+                with marked_timer("testing", timing_raw, color="green"):
+                    val_metrics: dict = self._validate()
+                    if is_last_step:
+                        last_val_metrics = val_metrics
+                metrics.update(val_metrics)
+
+            # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
+            esi_close_to_expiration = should_save_ckpt_esi(
+                max_steps_duration=self.max_steps_duration,
+                redundant_time=self.config.trainer.esi_redundant_time,
+            )
+            # Check if the conditions for saving a checkpoint are met.
+            # The conditions include a mandatory condition (1) and
+            # one of the following optional conditions (2/3/4):
+            # 1. The save frequency is set to a positive value.
+            # 2. It's the last training step.
+            # 3. The current step number is a multiple of the save frequency.
+            # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
+            if self.config.trainer.save_freq > 0 and (
+                is_last_step or self.global_steps % self.config.trainer.save_freq == 0 or esi_close_to_expiration
+            ):
+                if esi_close_to_expiration:
+                    print("Force saving checkpoint: ESI instance expiration approaching.")
+                with marked_timer("save_checkpoint", timing_raw, color="green"):
+                    self._save_checkpoint()
+
+            with marked_timer("stop_profile", timing_raw):
+                next_step_profile = (
+                    self.global_steps + 1 in self.config.global_profiler.steps
+                    if self.config.global_profiler.steps is not None
+                    else False
                 )
-                # Check if the conditions for saving a checkpoint are met.
-                # The conditions include a mandatory condition (1) and
-                # one of the following optional conditions (2/3/4):
-                # 1. The save frequency is set to a positive value.
-                # 2. It's the last training step.
-                # 3. The current step number is a multiple of the save frequency.
-                # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
-                if self.config.trainer.save_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.save_freq == 0 or esi_close_to_expiration
-                ):
-                    if esi_close_to_expiration:
-                        print("Force saving checkpoint: ESI instance expiration approaching.")
-                    with marked_timer("save_checkpoint", timing_raw, color="green"):
-                        self._save_checkpoint()
-
-                with marked_timer("stop_profile", timing_raw):
-                    next_step_profile = (
-                        self.global_steps + 1 in self.config.global_profiler.steps
-                        if self.config.global_profiler.steps is not None
-                        else False
-                    )
-                    self._stop_profiling(
-                        curr_step_profile and not next_step_profile
-                        if self.config.global_profiler.profile_continuous_steps
-                        else curr_step_profile
-                    )
-                    prev_step_profile = curr_step_profile
-                    curr_step_profile = next_step_profile
-
-                steps_duration = timing_raw["step"]
-                self.max_steps_duration = max(self.max_steps_duration, steps_duration)
-
-                # training metrics
-                metrics.update(
-                    {
-                        "training/global_step": self.global_steps,
-                        "training/epoch": epoch,
-                    }
+                self._stop_profiling(
+                    curr_step_profile and not next_step_profile
+                    if self.config.global_profiler.profile_continuous_steps
+                    else curr_step_profile
                 )
-                # collect metrics
+                prev_step_profile = curr_step_profile
+                curr_step_profile = next_step_profile
+
+            steps_duration = timing_raw["step"]
+            self.max_steps_duration = max(self.max_steps_duration, steps_duration)
+
+            # training metrics
+            metrics.update(
+                {
+                    "training/global_step": self.global_steps,
+                    "training/epoch": epoch,
+                }
+            )
+            # collect metrics
+            if batch is not None:
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
-                # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
-                # Note: mismatch metrics (KL, PPL, etc.) are collected at line 1179 after advantage computation
+            else:
+                metrics.update({f"timing_s/{name}": duration for name, duration in timing_raw.items()})
+            # Note: mismatch metrics (KL, PPL, etc.) are collected at line 1179 after advantage computation
 
-                # this is experimental and may be changed/removed in the future in favor of a general-purpose one
-                if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
-                    self.train_dataloader.sampler.update(batch=batch)
+            # this is experimental and may be changed/removed in the future in favor of a general-purpose one
+            if batch is not None and isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
+                self.train_dataloader.sampler.update(batch=batch)
 
-                # TODO: make a canonical logger that supports various backend
-                logger.log(data=metrics, step=self.global_steps)
+            # TODO: make a canonical logger that supports various backend
+            logger.log(data=metrics, step=self.global_steps)
 
-                progress_bar.update(1)
-                self.global_steps += 1
+            progress_bar.update(1)
+            self.global_steps += 1
 
-                if (
-                    hasattr(self.config.actor_rollout_ref.actor, "profiler")
-                    and self.config.actor_rollout_ref.actor.profiler.tool == "torch_memory"
-                ):
-                    self.actor_rollout_wg.dump_memory_snapshot(
-                        tag=f"post_update_step{self.global_steps}", sub_dir=f"step{self.global_steps}"
-                    )
+            if (
+                hasattr(self.config.actor_rollout_ref.actor, "profiler")
+                and self.config.actor_rollout_ref.actor.profiler.tool == "torch_memory"
+            ):
+                self.actor_rollout_wg.dump_memory_snapshot(
+                    tag=f"post_update_step{self.global_steps}", sub_dir=f"step{self.global_steps}"
+                )
 
-                if is_last_step:
-                    pprint(f"Final validation metrics: {last_val_metrics}")
-                    progress_bar.close()
-                    return
+            if is_last_step:
+                pprint(f"Final validation metrics: {last_val_metrics}")
+                progress_bar.close()
+                return
 
-                # this is experimental and may be changed/removed in the future
-                # in favor of a general-purpose data buffer pool
-                if hasattr(self.train_dataset, "on_batch_end"):
-                    # The dataset may be changed after each training batch
-                    self.train_dataset.on_batch_end(batch=batch)
+            # this is experimental and may be changed/removed in the future
+            # in favor of a general-purpose data buffer pool
+            if batch is not None and hasattr(self.train_dataset, "on_batch_end"):
+                # The dataset may be changed after each training batch
+                self.train_dataset.on_batch_end(batch=batch)

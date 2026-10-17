@@ -50,6 +50,13 @@ def main() -> None:
     adv_estimator = str(OmegaConf.select(method_config, "algorithm.adv_estimator"))
     lata_alpha = OmegaConf.select(method_config, "algorithm.turn_discount.alpha")
     lata_alpha = float(lata_alpha) if lata_alpha is not None else None
+    filter_config = OmegaConf.select(method_config, "algorithm.filter_groups")
+    filter_config = (
+        OmegaConf.to_container(filter_config, resolve=True)
+        if filter_config is not None
+        else {"enable": False}
+    )
+    dynamic_sampling = args.mode == "train" and bool(filter_config.get("enable"))
     assert reward_mode in {"binary", "prm_lite"}
     split_path = root / "experiments/sft_collect_airline/split.json"
     split = json.loads(split_path.read_text())
@@ -112,6 +119,12 @@ def main() -> None:
             "prefix_max_tokens": int(teacher_config.skill_prefix_max_tokens),
         }
     start = 0
+    dynamic_state = {
+        "generated_trajectories": 0,
+        "optimizer_updates": 0,
+        "skipped_updates": 0,
+        "global_step": 0,
+    }
     if args.resume:
         start = int(args.resume.name.removeprefix("global_step_"))
         for rel in (
@@ -122,6 +135,14 @@ def main() -> None:
         ):
             assert (args.resume / rel).is_file(), f"Incomplete checkpoint: {rel}"
         assert 0 < start < args.steps
+        if dynamic_sampling:
+            state_path = args.resume / "dynamic_sampling.json"
+            assert state_path.is_file(), "Dynamic-sampling checkpoint state is missing"
+            dynamic_state = json.loads(state_path.read_text())
+            assert dynamic_state.get("global_step") == start
+            assert dynamic_state.get("optimizer_updates", 0) + dynamic_state.get(
+                "skipped_updates", 0
+            ) == start
     if args.adapter:
         for name in ("adapter_config.json", "adapter_model.safetensors"):
             assert (args.adapter / name).is_file(), f"Missing adapter file: {name}"
@@ -142,7 +163,33 @@ def main() -> None:
             if step % frequency == 0 or step == args.steps
         ]
 
-    evaluation_steps = scheduled_steps(args.eval_freq)
+    evaluation_steps = [] if dynamic_sampling else scheduled_steps(args.eval_freq)
+    checkpoint_steps = [] if dynamic_sampling else scheduled_steps(args.save_freq)
+    if dynamic_sampling:
+        trajectory_budget = int(filter_config.get("trajectory_budget", 0))
+        generated = int(dynamic_state["generated_trajectories"])
+        assert filter_config.get("metric") == "outcome_reward"
+        assert int(filter_config.get("max_num_gen_batches", 0)) > 0
+        assert trajectory_budget > generated >= 0
+        expected_training_trajectories = trajectory_budget - generated
+        dynamic_metadata = {
+            **filter_config,
+            "enabled": True,
+            "initial_generated_trajectories": generated,
+            "initial_optimizer_updates": int(dynamic_state["optimizer_updates"]),
+            "initial_skipped_updates": int(dynamic_state["skipped_updates"]),
+            "expected_generated_trajectories_this_run": expected_training_trajectories,
+            "schedule_policy": "frequency_plus_actual_final_step",
+        }
+    else:
+        expected_training_trajectories = (args.steps - start) * 4 * args.samples
+        dynamic_metadata = {"enabled": False}
+    expected_trajectories = (
+        len(ids) * args.samples
+        if args.mode == "eval"
+        else expected_training_trajectories
+        + len(evaluation_steps) * len(ids) * args.eval_samples
+    )
     metadata = {
         "protocol": PROTOCOL,
         "config_name": config_name,
@@ -168,14 +215,16 @@ def main() -> None:
         "train_batch_size": 4,
         "total_steps": args.steps,
         "start_step": start,
-        "expected_trajectories": len(ids) * args.samples
-        if args.mode == "eval"
-        else (args.steps - start) * 4 * args.samples
-        + len(evaluation_steps) * len(ids) * args.eval_samples,
+        "expected_trajectories": expected_trajectories,
+        "expected_training_trajectories": expected_training_trajectories
+        if args.mode == "train"
+        else 0,
         "checkpoint_root": str(args.checkpoint_root or args.run / "checkpoints"),
-        "checkpoint_steps": scheduled_steps(args.save_freq),
+        "checkpoint_steps": checkpoint_steps,
+        "checkpoint_frequency": args.save_freq,
         "checkpoint_archive_root": os.environ.get("CHECKPOINT_ARCHIVE_ROOT"),
         "evaluation_steps": evaluation_steps,
+        "evaluation_frequency": args.eval_freq,
         "eval_samples_per_task": args.eval_samples,
         "resume_from": str(args.resume) if args.resume else None,
         "adapter": str(args.adapter) if args.adapter else None,
@@ -183,6 +232,7 @@ def main() -> None:
         "seed": 42,
         "split_sha256": hashlib.sha256(split_path.read_bytes()).hexdigest(),
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+        "dynamic_sampling": dynamic_metadata,
     }
     if skill_metadata is not None:
         metadata["distillation"]["skill_bank"] = skill_metadata

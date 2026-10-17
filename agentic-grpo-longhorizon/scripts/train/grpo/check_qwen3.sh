@@ -11,7 +11,7 @@ python -m pytest -q src/envs/tests/test_mimo_client.py src/envs/tests/test_tau_b
     src/evaluation/tests/test_qwen3_summary.py src/envs/tests/test_agent_loop_lifecycle.py src/evaluation/tests/test_e00_summary.py \
     src/envs/tests/test_prm_lite_v4.py src/envs/tests/test_tau_bench_joint_loop.py \
     src/evaluation/tests/test_qwen3_checkpoint.py src/training/tests/test_qwen3_readiness.py ../verl/tests/trainer/ppo/test_grpo_signal_on_cpu.py \
-    ../verl/tests/trainer/ppo/test_grpo_lata_on_cpu.py
+    ../verl/tests/trainer/ppo/test_grpo_lata_on_cpu.py ../verl/tests/trainer/ppo/test_dynamic_sampling_on_cpu.py
 python scripts/train/grpo/prepare_qwen3_run.py "$RUN_DIR" --mode train
 python - "$RUN_ROOT" <<'PY'
 import copy,sys,yaml
@@ -29,6 +29,11 @@ train=config('configs/train/grpo','qwen3_mimo','train_config.yaml')
 joint=config('configs/train/grpo','qwen3_prm_lite_lata','joint_config.yaml')
 eval_config=config('configs/eval/qwen3','eval_qwen3','eval_config.yaml')
 formal=config('configs/train/grpo','qwen3_formal','formal_config.yaml')
+dynamic=config('configs/train/grpo','qwen3_dynamic_sampling','dynamic_config.yaml')
+assert dynamic['algorithm']['filter_groups']=={'enable':True,'metric':'outcome_reward','max_num_gen_batches':3,'trajectory_budget':6400}
+dynamic_comparable=copy.deepcopy(dynamic)
+dynamic_comparable['algorithm'].pop('filter_groups')
+assert dynamic_comparable==formal, 'Dynamic sampling differs from E01 outside group filtering'
 assert formal['trainer']['total_training_steps']==200
 assert formal['trainer']['total_epochs']==20
 assert formal['trainer']['save_freq']==50 and formal['trainer']['test_freq']==100

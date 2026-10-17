@@ -51,6 +51,11 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def dynamic_microbatch_loss_scale(micro_batch_size: int, mini_batch_size: int) -> float:
+    """Weight a dynamic micro-batch against the mini-batch actually being updated."""
+    return micro_batch_size / mini_batch_size
+
+
 class DataParallelPPOActor(BasePPOActor):
     """FSDP DataParallel PPO Actor or Ref worker
 
@@ -468,7 +473,10 @@ class DataParallelPPOActor(BasePPOActor):
                     loss_agg_mode = self.config.loss_agg_mode
 
                     if self.config.use_dynamic_bsz:
-                        loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
+                        # The final dynamic-sampling update can contain fewer groups than the
+                        # configured mini-batch. Normalize over the actual local mini-batch so
+                        # an 8/16/24-trajectory update is not silently scaled down.
+                        loss_scale_factor = dynamic_microbatch_loss_scale(response_mask.shape[0], len(mini_batch))
                     else:
                         loss_scale_factor = 1 / self.gradient_accumulation
 

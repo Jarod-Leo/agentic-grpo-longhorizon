@@ -145,6 +145,158 @@ def test_periodic_eval_and_external_checkpoints(tmp_path):
     path.write_text("".join(json.dumps(r) + "\n" for r in rows))
 
 
+def test_dynamic_sampling_counts_filtered_rollouts_and_actual_final_step(tmp_path):
+    write_run(tmp_path, [0] * 8)
+    meta = json.loads((tmp_path / "run.json").read_text())
+    meta.update(
+        mode="train",
+        train_batch_size=2,
+        samples_per_task=2,
+        total_steps=10,
+        start_step=0,
+        expected_trajectories=12,
+        expected_training_trajectories=12,
+        evaluation_steps=[],
+        evaluation_frequency=10,
+        eval_samples_per_task=2,
+        checkpoint_steps=[],
+        checkpoint_frequency=1,
+        checkpoint_root=str(tmp_path / "checkpoints"),
+        dynamic_sampling={
+            "enabled": True,
+            "metric": "outcome_reward",
+            "max_num_gen_batches": 2,
+            "trajectory_budget": 12,
+            "initial_generated_trajectories": 0,
+            "initial_optimizer_updates": 0,
+            "initial_skipped_updates": 0,
+        },
+    )
+    (tmp_path / "run.json").write_text(json.dumps(meta))
+
+    rows = []
+    scores = {
+        1: {1: [0, 1], 4: [0, 1]},
+        2: {1: [0, 0, 0, 0], 4: [1, 1, 1, 1]},
+    }
+    for step, task_scores in scores.items():
+        for task_id, values in task_scores.items():
+            for sample, score in enumerate(values):
+                rows.append(
+                    {
+                        "trajectory_id": f"train-{step}-{task_id}-{sample}",
+                        "step": step,
+                        "validate": False,
+                        "task_id": task_id,
+                        "split": "train",
+                        "score": score,
+                        "protocol": "v2",
+                        "schema_verified": True,
+                    }
+                )
+    for task_id in (1, 4):
+        for sample in range(2):
+            rows.append(
+                {
+                    "trajectory_id": f"eval-2-{task_id}-{sample}",
+                    "step": 2,
+                    "validate": True,
+                    "task_id": task_id,
+                    "split": "train",
+                    "score": 1,
+                    "protocol": "v2",
+                    "schema_verified": True,
+                }
+            )
+    dynamic_metrics = [
+        {
+            "step": 1,
+            "data": {
+                "actor/grad_norm": 0.1,
+                "dynamic_sampling/generated_trajectories": 4,
+                "dynamic_sampling/generated_this_step": 4,
+                "dynamic_sampling/num_gen_batches": 1,
+                "dynamic_sampling/generated_groups": 2,
+                "dynamic_sampling/mixed_groups": 2,
+                "dynamic_sampling/retained_groups": 2,
+                "dynamic_sampling/dropped_excess_groups": 0,
+                "dynamic_sampling/optimizer_updates": 1,
+                "dynamic_sampling/skipped_updates": 0,
+                "dynamic_sampling/budget_exhausted": 0,
+            },
+        },
+        {
+            "step": 2,
+            "data": {
+                "dynamic_sampling/generated_trajectories": 12,
+                "dynamic_sampling/generated_this_step": 8,
+                "dynamic_sampling/num_gen_batches": 2,
+                "dynamic_sampling/generated_groups": 4,
+                "dynamic_sampling/mixed_groups": 0,
+                "dynamic_sampling/retained_groups": 0,
+                "dynamic_sampling/dropped_excess_groups": 0,
+                "dynamic_sampling/optimizer_updates": 1,
+                "dynamic_sampling/skipped_updates": 1,
+                "dynamic_sampling/budget_exhausted": 1,
+            },
+        },
+    ]
+    for name, values in (
+        ("eval_trajectories", rows),
+        (
+            "tool_audit",
+            [
+                {"event": "generation", "trajectory_id": row["trajectory_id"]}
+                for row in rows
+            ],
+        ),
+        ("api", [{"success": True}]),
+        ("metrics", dynamic_metrics),
+    ):
+        (tmp_path / f"{name}.jsonl").write_text(
+            "".join(json.dumps(value) + "\n" for value in values)
+        )
+    for step, state in (
+        (1, (4, 1, 0)),
+        (2, (12, 1, 1)),
+    ):
+        checkpoint = tmp_path / f"checkpoints/global_step_{step}"
+        for name in (
+            "data.pt",
+            "actor/model_world_size_1_rank_0.pt",
+            "actor/optim_world_size_1_rank_0.pt",
+            "actor/extra_state_world_size_1_rank_0.pt",
+            "actor/lora_adapter/adapter_config.json",
+            "actor/lora_adapter/adapter_model.safetensors",
+        ):
+            path = checkpoint / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        generated, updates, skips = state
+        (checkpoint / "dynamic_sampling.json").write_text(
+            json.dumps(
+                {
+                    "generated_trajectories": generated,
+                    "optimizer_updates": updates,
+                    "skipped_updates": skips,
+                    "global_step": step,
+                }
+            )
+        )
+
+    result, _ = build_summary(tmp_path)
+    assert result["accepted"], result["checks"]
+    assert result["learning"]["groups"] == 6
+    assert result["learning"]["mixed_outcome_groups"] == 2
+    assert result["learning"]["optimizer_updates"] == 1
+    assert result["learning"]["skipped_updates"] == 1
+    assert set(result["evaluations"]) == {"2"}
+
+    path = tmp_path / "eval_trajectories.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows[:-5] + rows[-4:]))
+    assert not build_summary(tmp_path)[0]["checks"]["dynamic_all_rollouts_recorded"]
+
+
 def write_joint_run(tmp_path, mode="train"):
     write_run(tmp_path, [0] * 8)
     meta = json.loads((tmp_path / "run.json").read_text())

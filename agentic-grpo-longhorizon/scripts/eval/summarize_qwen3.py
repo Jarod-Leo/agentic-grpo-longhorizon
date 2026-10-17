@@ -44,6 +44,8 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
     ids = [row.get("trajectory_id") for row in rows]
     tools = summarize_tools(audit)
     mode = meta.get("mode")
+    dynamic = meta.get("dynamic_sampling", {})
+    dynamic_enabled = mode == "train" and dynamic.get("enabled") is True
     eval_split = meta.get("eval_split", "train")
     tasks = (
         meta.get(f"{eval_split}_task_ids", [])
@@ -63,7 +65,9 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
     exit_path = run / "exit_code.txt"
     checks = {
         "process_success": exit_path.exists() and exit_path.read_text().strip() == "0",
-        "expected_unique_trajectories": len(rows) == meta.get("expected_trajectories")
+        "expected_unique_trajectories": (
+            dynamic_enabled or len(rows) == meta.get("expected_trajectories")
+        )
         and len(set(ids)) == len(ids)
         and None not in ids,
         "task_split_matches": bool(rows)
@@ -152,28 +156,152 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
             }
         )
     elif mode == "train":
-        steps = set(
-            range(meta.get("start_step", 0) + 1, meta.get("total_steps", 0) + 1)
+        dynamic_metrics = [
+            row
+            for row in metrics
+            if "dynamic_sampling/generated_trajectories" in row.get("data", row)
+        ]
+        final_step = (
+            max((row.get("step", 0) for row in dynamic_metrics), default=0)
+            if dynamic_enabled
+            else meta.get("total_steps", 0)
         )
+        steps = set(range(meta.get("start_step", 0) + 1, final_step + 1))
         grouped = defaultdict(list)
         for row in training_rows:
             grouped[row.get("step")].append(row)
         checks["training_steps"] = set(grouped) == steps
-        checks["groups_per_step"] = all(
-            len(batch) == meta["train_batch_size"] * meta["samples_per_task"]
-            and len(Counter(row["task_id"] for row in batch))
-            == meta["train_batch_size"]
-            and all(
-                n == meta["samples_per_task"]
-                for n in Counter(row["task_id"] for row in batch).values()
-            )
-            for batch in grouped.values()
-        )
         actor_metrics = [row for row in metrics if contains_training_metric(row)]
-        checks["actor_updates_per_step"] = {
-            row.get("step") for row in actor_metrics
-        } == steps
-        checks["finite_actor_metrics"] = bool(actor_metrics) and all(
+        if dynamic_enabled:
+            metric_by_step = defaultdict(list)
+            for row in dynamic_metrics:
+                metric_by_step[row.get("step")].append(row)
+            ordered_dynamic = [
+                metric_by_step[step][0]
+                for step in sorted(steps)
+                if metric_by_step[step]
+            ]
+            initial_generated = int(dynamic.get("initial_generated_trajectories", 0))
+            initial_updates = int(dynamic.get("initial_optimizer_updates", 0))
+            initial_skips = int(dynamic.get("initial_skipped_updates", 0))
+            budget = int(dynamic.get("trajectory_budget", 0))
+            samples = int(meta.get("samples_per_task", 0))
+            batch_trajectories = int(meta.get("train_batch_size", 0)) * samples
+
+            previous_generated = initial_generated
+            previous_updates = initial_updates
+            previous_skips = initial_skips
+            counters_valid = True
+            groups_valid = True
+            update_steps = set()
+            for row in ordered_dynamic:
+                data = row.get("data", row)
+                generated = data.get("dynamic_sampling/generated_trajectories")
+                generated_this_step = data.get("dynamic_sampling/generated_this_step")
+                num_batches = data.get("dynamic_sampling/num_gen_batches")
+                generated_groups = data.get("dynamic_sampling/generated_groups")
+                mixed_groups = data.get("dynamic_sampling/mixed_groups")
+                retained_groups = data.get("dynamic_sampling/retained_groups")
+                dropped_groups = data.get("dynamic_sampling/dropped_excess_groups")
+                optimizer_updates = data.get("dynamic_sampling/optimizer_updates")
+                skipped_updates = data.get("dynamic_sampling/skipped_updates")
+                values = (
+                    generated,
+                    generated_this_step,
+                    num_batches,
+                    generated_groups,
+                    mixed_groups,
+                    retained_groups,
+                    dropped_groups,
+                    optimizer_updates,
+                    skipped_updates,
+                )
+                if not all(
+                    isinstance(value, int) and not isinstance(value, bool)
+                    for value in values
+                ):
+                    counters_valid = False
+                    continue
+                counters_valid &= (
+                    generated == previous_generated + generated_this_step
+                    and optimizer_updates == previous_updates + int(retained_groups > 0)
+                    and skipped_updates == previous_skips + int(retained_groups == 0)
+                )
+                groups_valid &= (
+                    generated_this_step == num_batches * batch_trajectories
+                    and generated_this_step == generated_groups * samples
+                    and 0 <= dropped_groups <= mixed_groups
+                    and retained_groups == mixed_groups - dropped_groups
+                    and 0 <= retained_groups <= meta.get("train_batch_size", 0)
+                )
+                if retained_groups > 0:
+                    update_steps.add(row.get("step"))
+                previous_generated = generated
+                previous_updates = optimizer_updates
+                previous_skips = skipped_updates
+
+            actor_steps = {row.get("step") for row in actor_metrics}
+            final_data = (
+                ordered_dynamic[-1].get("data", ordered_dynamic[-1])
+                if ordered_dynamic
+                else {}
+            )
+            checks.update(
+                {
+                    "dynamic_metrics_per_attempt": bool(steps)
+                    and set(metric_by_step) == steps
+                    and all(len(metric_by_step[step]) == 1 for step in steps),
+                    "dynamic_counters_consistent": counters_valid,
+                    "dynamic_groups_consistent": groups_valid,
+                    "dynamic_budget_exhausted": bool(ordered_dynamic)
+                    and previous_generated == budget
+                    and final_data.get("dynamic_sampling/budget_exhausted") == 1
+                    and all(
+                        row.get("data", row).get(
+                            "dynamic_sampling/budget_exhausted"
+                        )
+                        == 0
+                        for row in ordered_dynamic[:-1]
+                    ),
+                    "dynamic_all_rollouts_recorded": sum(
+                        row.get("data", row).get("dynamic_sampling/generated_this_step", -1)
+                        for row in ordered_dynamic
+                    )
+                    == len(training_rows)
+                    == meta.get("expected_training_trajectories"),
+                    "groups_per_step": all(
+                        len(grouped[step])
+                        == metric_by_step[step][0]
+                        .get("data", metric_by_step[step][0])
+                        .get("dynamic_sampling/generated_this_step")
+                        and all(
+                            count % samples == 0
+                            for count in Counter(
+                                row.get("task_id") for row in grouped[step]
+                            ).values()
+                        )
+                        for step in steps
+                    ),
+                    "actor_updates_per_step": actor_steps == update_steps,
+                }
+            )
+        else:
+            checks["groups_per_step"] = all(
+                len(batch) == meta["train_batch_size"] * meta["samples_per_task"]
+                and len(Counter(row["task_id"] for row in batch))
+                == meta["train_batch_size"]
+                and all(
+                    n == meta["samples_per_task"]
+                    for n in Counter(row["task_id"] for row in batch).values()
+                )
+                for batch in grouped.values()
+            )
+            checks["actor_updates_per_step"] = {
+                row.get("step") for row in actor_metrics
+            } == steps
+        checks["finite_actor_metrics"] = (
+            bool(actor_metrics) or (dynamic_enabled and not update_steps)
+        ) and all(
             math.isfinite(value)
             for row in actor_metrics
             for value in row.get("data", row).values()
@@ -182,9 +310,16 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
         eval_grouped = defaultdict(list)
         for row in validation_rows:
             eval_grouped[row.get("step")].append(row)
-        checks["evaluation_steps"] = set(eval_grouped) == set(
-            meta.get("evaluation_steps", [])
-        )
+        if dynamic_enabled:
+            frequency = int(meta.get("evaluation_frequency", -1))
+            evaluation_steps = {
+                step for step in steps if frequency > 0 and step % frequency == 0
+            }
+            if final_step:
+                evaluation_steps.add(final_step)
+        else:
+            evaluation_steps = set(meta.get("evaluation_steps", []))
+        checks["evaluation_steps"] = set(eval_grouped) == evaluation_steps
         for step, batch in eval_grouped.items():
             counts = Counter(row.get("task_id") for row in batch)
             checks[f"evaluation_{step}_samples"] = set(counts) == set(tasks) and all(
@@ -192,7 +327,16 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
             )
             eval_tasks = per_task_results(batch, task_splits)
             evaluations[str(step)] = aggregate_split(eval_tasks, eval_split)
-        for step in meta.get("checkpoint_steps", sorted(steps)):
+        if dynamic_enabled:
+            frequency = int(meta.get("checkpoint_frequency", -1))
+            checkpoint_steps = {
+                step for step in steps if frequency > 0 and step % frequency == 0
+            }
+            if final_step:
+                checkpoint_steps.add(final_step)
+        else:
+            checkpoint_steps = set(meta.get("checkpoint_steps", sorted(steps)))
+        for step in sorted(checkpoint_steps):
             checkpoint = (
                 Path(meta.get("checkpoint_root", str(run / "checkpoints")))
                 / f"global_step_{step}"
@@ -208,6 +352,20 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
                     "actor/lora_adapter/adapter_model.safetensors",
                 )
             )
+            if dynamic_enabled:
+                state, err = read_json(checkpoint / "dynamic_sampling.json", {})
+                errors.extend(err)
+                step_metric = metric_by_step.get(step, [{}])[0]
+                step_data = step_metric.get("data", step_metric)
+                checks[f"checkpoint_{step}_dynamic_sampling"] = (
+                    state.get("global_step") == step
+                    and state.get("generated_trajectories")
+                    == step_data.get("dynamic_sampling/generated_trajectories")
+                    and state.get("optimizer_updates")
+                    == step_data.get("dynamic_sampling/optimizer_updates")
+                    and state.get("skipped_updates")
+                    == step_data.get("dynamic_sampling/skipped_updates")
+                )
             distillation = meta.get("distillation", {})
             actor = distillation.get("actor", {})
             teacher = distillation.get("teacher") or {}
@@ -262,14 +420,38 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
             and group_has_training_signal(group)
             for group in reward_groups.values()
         )
-        learning = {
-            "groups": len(reward_groups),
-            "mixed_outcome_groups": mixed,
-            "training_reward_signal_groups": signal_groups,
-            "saturated_outcome_groups": len(reward_groups) - mixed,
-            "saturated_outcome_groups_with_process_signal": saturated_with_process_signal,
-            "signal_observed": signal_groups > 0,
-        }
+        if dynamic_enabled:
+            dynamic_values = [row.get("data", row) for row in ordered_dynamic]
+            generated_groups = sum(
+                row["dynamic_sampling/generated_groups"] for row in dynamic_values
+            )
+            mixed = sum(row["dynamic_sampling/mixed_groups"] for row in dynamic_values)
+            retained = sum(
+                row["dynamic_sampling/retained_groups"] for row in dynamic_values
+            )
+            dropped = sum(
+                row["dynamic_sampling/dropped_excess_groups"] for row in dynamic_values
+            )
+            learning = {
+                "groups": generated_groups,
+                "mixed_outcome_groups": mixed,
+                "retained_mixed_groups": retained,
+                "dropped_excess_mixed_groups": dropped,
+                "saturated_outcome_groups": generated_groups - mixed,
+                "optimizer_updates": previous_updates - initial_updates,
+                "skipped_updates": previous_skips - initial_skips,
+                "generated_trajectories": previous_generated - initial_generated,
+                "signal_observed": retained > 0,
+            }
+        else:
+            learning = {
+                "groups": len(reward_groups),
+                "mixed_outcome_groups": mixed,
+                "training_reward_signal_groups": signal_groups,
+                "saturated_outcome_groups": len(reward_groups) - mixed,
+                "saturated_outcome_groups_with_process_signal": saturated_with_process_signal,
+                "signal_observed": signal_groups > 0,
+            }
         distill = meta.get("distillation", {}).get("actor", {})
         if distill.get("enabled", False) and distill.get("coef", 0) > 0:
             objective = "skill_sd" if distill.get("loss_type") == "skill_sd" else "opd"
