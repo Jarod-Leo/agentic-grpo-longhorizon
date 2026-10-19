@@ -196,6 +196,12 @@ def main() -> None:
         "interaction_config_path": str(
             method_config.actor_rollout_ref.rollout.multi_turn.interaction_config_path
         ),
+        "max_tool_response_length": int(
+            method_config.actor_rollout_ref.rollout.multi_turn.max_tool_response_length
+        ),
+        "tool_response_truncate_side": str(
+            method_config.actor_rollout_ref.rollout.multi_turn.tool_response_truncate_side
+        ),
         "eval_temperature": float(method_config.actor_rollout_ref.rollout.val_kwargs.temperature),
         "eval_top_p": float(method_config.actor_rollout_ref.rollout.val_kwargs.top_p),
         "config_name": config_name,

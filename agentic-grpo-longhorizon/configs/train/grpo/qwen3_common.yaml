@@ -62,6 +62,9 @@ actor_rollout_ref:
       format: hermes
       max_user_turns: 15
       max_assistant_turns: 15
+      # Airline observations can contain complete reservations, including the
+      # flight and payment fields needed by the next policy turn.
+      max_tool_response_length: 65536
       tool_config_path: ${oc.env:REPO}/configs/tool_config/tau_bench_airline_tools.yaml
       interaction_config_path: ${oc.env:REPO}/configs/interaction_config/tau_bench_airline_mimo.yaml
     n: 8
