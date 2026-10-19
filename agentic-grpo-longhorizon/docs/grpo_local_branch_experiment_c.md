@@ -11,7 +11,7 @@
 - Base：`/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/models/Qwen/Qwen3-8B`。
 - E01 checkpoint：`/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/checkpoints/e01_vanilla_grpo/formal-seed42-200-v3/global_step_200`。
 - 冻结诊断加载上述 checkpoint 的 `actor/lora_adapter`，不加载优化器、不执行梯度更新、不写完整 checkpoint。
-- 新验证使用 MiMo `mimo-v2.6`，100 RPM、1000 万 TPM。历史 E01/B 使用 v2.5，历史数字不能作为新协议下的严格配对对照。
+- 新验证使用 MiMo `mimo-v2.6-pro`，100 RPM、1000 万 TPM。历史 E01/B 使用 v2.5，历史数字不能作为新协议下的严格配对对照。
 - 成功判定沿用原始 tau-bench 二元结果，不增加 LLM judge、不更改奖励规则。
 - 候选及续写使用同一冻结模型；训练分布诊断采用 temperature=1、top_p=1，区别于历史 test 的 0.7/0.9。
 
@@ -86,3 +86,55 @@ MiMo 进度的终止轨迹总数因跳过分支而未知，日志显示 `N/?`；
 - 原始主轨迹、工具审计和 API 日志分别为 `eval_trajectories.jsonl`、`tool_audit.jsonl`、`api.jsonl`。
 
 branch_summary 的 `engineering_accepted` 是执行完整性验收；`signal_screen` 是描述性筛选，不能代替额外续写稳定性验证或短程训练验收。
+
+## 2026-10-19：终止处理复核与修复后重验
+
+source-v4 的 smoke 212144 完成，用时 20 分 46 秒；signal 212145 完成，用时 1 小时 3 分 44 秒。
+signal 的 120 条主轨迹产生 42 个实际分支点、168 个候选、336 条后缀续写；原始候选样本均值有差异的分支点为 4/42（9.52%）。
+其中两个分支点的四个候选 token 完全相同，均值差异来自续写随机性，不能视作不同动作的信用信号。
+
+虽然旧汇总的已有工程检查全部通过，后续复核发现共用终止处理有缺陷：
+`transfer_to_human_agents` 在 tau-bench 中已经结束环境，但 veRL 工具处理后仍返回生成状态。
+107 条主轨迹与 243 条分支续写在成功转人工后继续生成；78 个跳过记录全部发生在锚点前已成功转人工的轨迹。
+上游环境在终止评分时会重建目标数据库，因此终止后的继续执行可能污染状态或重复累计奖励。
+旧运行保留用于故障追溯，不能作为修复后协议的性能或信用信号结论；历史模型指标也需复评，尚不能量化影响。
+
+修复范围保持在现有共用入口：
+
+1. tau-bench 适配层在首次环境终止后停止生成、工具执行和用户模拟器请求，保留首次终止结果，不改变原始成功判定。
+2. C 的候选及后缀统一复用修复后的 TauBenchAgentLoop；跳过原因区分锚点前终止、预算不足、未到达锚点及污染前缀。
+3. 共用评测和 C 汇总增加终止后调用检查。新运行标注 `terminal_semantics=first_environment_done_v1`，不覆盖历史产物。
+4. 保留原始候选样本和原始优势用于追溯；诊断按完全相同的候选 token 合并续写统计，将原始样本差异与动作间差异分别报告。
+5. 新 smoke 仍使用 K=4、M=2；信号诊断保持 40 个 train 任务×3 条主轨迹、锚点 [2,4,6]，将 M 增加到 8，报告独立两半续写的动作排序一致性。该指标仍是描述性诊断。
+6. 使用同一修复源码和 MiMo v2.6 Pro，通过共享 `eval_qwen3.sh` 重新评测 E01 step200：train 40×8、test 10×8，temperature=0.7、top_p=0.9。
+
+提交顺序为 CPU 回归检查 → GPU smoke → C 信号诊断 → E01 train 复评 → E01 test 复评，均用 `afterok` 依赖串行执行，避免多个作业同时争用 100 RPM 的 MiMo 配额。
+只申请单卡 Pro6000；C 信号诊断上限 6 小时，其他 GPU 验证上限 2 小时；不写完整 checkpoint、不进行参数更新。
+源码在提交前冻结，提交编号和输出路径记录在各运行目录的 `submission.json`。
+
+修复快照为 `experiments/grpo_local_branch/source-v5`。CPU 作业 212674 已完成，70 项 pytest、Hydra M8 配置、shell 语法及既有 Ruff 检查全部通过；历史日志回归检查成功拒绝 source-v4 中终止后的继续执行。
+
+| 阶段 | Job ID | 前置作业 | 运行目录（相对 experiments/） |
+| --- | --- | --- | --- |
+| CPU | 212674 | — | `grpo_local_branch/cpu-check-v6` |
+| GPU smoke，K4/M2 | 212684 | 212674 | `grpo_local_branch/smoke-e01-step200-terminal-v1` |
+| C 信号诊断，K4/M8 | 212685 | 212684 | `grpo_local_branch/signal-e01-step200-terminal-m8-v1` |
+| E01 train，40×8 | 212686 | 212685 | `e01_vanilla_grpo/train-step200-terminal-v1` |
+| E01 test，10×8 | 212687 | 212686 | `e01_vanilla_grpo/test-step200-terminal-v1` |
+
+提交时上述 GPU 作业尚未完成。C 的 pooled 信号未达阈值不等于工程失败，依赖链只要求执行及工程检查成功，不会自动进入参数更新。
+
+### 修复后 GPU 结果
+
+212684 smoke 已完成，用时 17 分 57 秒，4 个分支点、32 条后缀续写，工程验收通过。
+212685 信号诊断已完成，用时 56 分 39 秒，工程验收通过，结果如下：
+
+- 120 条主轨迹中，44 个分支点执行完成；76 个在锚点前已经终止，正确记录为 `terminal_before_anchor`。
+- 176 个候选动作，每个动作 8 次后缀续写，共 1,408 条后缀；其中 352 条成功（25%）。这是条件分支回报，不能作为新模型的独立评测指标。
+- 原始候选均值有差异的分支点为 0/44；合并相同 token 动作后的动作差异同样为 0/44。全部局部优势为零。
+- 36 个分支点含至少两个不同的 token 动作；前后各 4 次续写均未形成可比较的动作排序。
+- smoke 与 signal 的终止后生成、工具执行、用户 API 请求均为 0。signal 的 1,128 条发生成功转人工的轨迹均通过终止审计。
+- signal 共 1,442 次 MiMo 请求，全部成功；API 总 token 为 1,099,225，其中分支消耗 1,017,403。
+
+结论：终止处理修复已通过本次 CPU/GPU 验证，但当前 E01 step200、固定锚点 [2,4,6]、K4/M8 的方案没有获得非零局部信用信号，未通过进入短程参数更新的筛选。不能将工程运行成功视作算法验证通过。
+E01 train 复评 212686 已启动，test 212687 等待其成功结束；最终独立成功率以各自 `eval/summary.json` 为准。

@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from src.evaluation.local_branch_metrics import build_local_branch_summary
+from src.evaluation.local_branch_metrics import (
+    build_local_branch_summary,
+    summarize_action_variation,
+    summarize_split_half_stability,
+)
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -216,8 +220,102 @@ def test_signal_screen_is_provisional_and_reports_continuation_noise(tmp_path):
     assert summary["engineering_accepted"], summary["engineering_checks"]
     assert summary["signal_screen"]["status"] == "provisional_above_threshold"
     assert summary["signal_screen"]["statistical_significance_tested"] is False
+    assert summary["signal_screen"]["effective_branch_rate"] == 0.5
+    assert summary["signal_screen"]["raw_effective_branch_rate"] == 0.5
     assert summary["continuation_variation"]["reward_disagreement_rate"] == 0.5
     assert summary["candidate_diversity"]["mean_unique_fraction"] == 1.0
+
+
+def test_identical_actions_pool_suffix_noise_without_forcing_diversity(tmp_path):
+    _make_run(tmp_path, stage="signal")
+    path = tmp_path / "branches/worker-1.jsonl"
+    groups = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    for group in groups:
+        for candidate in group["candidates"]:
+            candidate["candidate_token_ids"] = [7, 8]
+    _write_jsonl(path, groups)
+
+    summary = build_local_branch_summary(tmp_path)
+
+    assert summary["engineering_accepted"], summary["engineering_checks"]
+    assert summary["signal_screen"]["raw_effective_branch_rate"] == 0.5
+    assert summary["signal_screen"]["effective_branch_rate"] == 0.0
+    assert summary["signal_screen"]["status"] == "provisional_below_threshold"
+    assert summary["action_variation"]["groups_with_duplicate_actions"] == 4
+
+
+def test_duplicate_candidates_receive_the_same_pooled_action_mean():
+    candidates = [
+        _candidate("root", index, rewards)
+        for index, rewards in enumerate(([0, 0], [0, 1], [0, 0], [0, 0]))
+    ]
+    for candidate in candidates:
+        candidate["candidate_token_ids"] = [7, 8]
+
+    variation = summarize_action_variation(candidates)
+
+    assert variation["raw_candidate_mean_rewards"] == [0.0, 0.5, 0.0, 0.0]
+    assert variation["pooled_candidate_mean_rewards"] == [0.125] * 4
+    assert variation["raw_effective"] is True
+    assert variation["effective"] is False
+
+
+def test_split_half_stability_reports_same_best_switches_and_ties():
+    same = {
+        "candidates": [
+            _candidate("same", 0, [1, 1, 1, 1]),
+            _candidate("same", 1, [0, 0, 0, 0]),
+        ]
+    }
+    switched = {
+        "candidates": [
+            _candidate("switched", 0, [1, 1, 0, 0]),
+            _candidate("switched", 1, [0, 0, 1, 1]),
+        ]
+    }
+    tied = {
+        "candidates": [
+            _candidate("tied", 0, [1, 1, 1, 1]),
+            _candidate("tied", 1, [1, 1, 0, 0]),
+            _candidate("tied", 2, [0, 0, 0, 0]),
+        ]
+    }
+
+    stability = summarize_split_half_stability([same, switched, tied], 4)
+
+    assert stability["available"] is True
+    assert stability["multi_action_prefixes"] == 3
+    assert stability["informative_in_both_halves"] == 3
+    assert stability["unique_best_in_both_halves"] == 2
+    assert stability["ties_in_either_half"] == 1
+    assert stability["same_unique_best_action"] == 1
+    assert stability["same_unique_best_action_rate"] == 0.5
+
+
+def test_post_terminal_generation_rejects_engineering_gate(tmp_path):
+    _make_run(tmp_path, stage="signal")
+    trajectory_id = "root-0-0"
+    audit_path = tmp_path / "tool_audit.jsonl"
+    audit_rows = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    audit_rows.extend(
+        [
+            {
+                "event": "execution",
+                "trajectory_id": trajectory_id,
+                "name": "transfer_to_human_agents",
+                "error": False,
+                "time": 100.0,
+            },
+            {"event": "generation", "trajectory_id": trajectory_id, "time": 101.0},
+        ]
+    )
+    _write_jsonl(audit_path, audit_rows)
+
+    summary = build_local_branch_summary(tmp_path)
+
+    assert summary["engineering_accepted"] is False
+    assert summary["engineering_checks"]["no_calls_after_successful_terminal"] is False
+    assert summary["terminal_behavior"]["post_terminal_generation_events"] == 1
 
 
 @pytest.mark.parametrize("corruption", ["missing_repeat", "nonbinary", "duplicate_id", "bad_task"])

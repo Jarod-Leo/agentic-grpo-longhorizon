@@ -4,6 +4,8 @@ set -eo pipefail
 export EVAL_SPLIT=train
 export SAMPLES=${SAMPLES:-1}
 export BRANCH_STAGE=${BRANCH_STAGE:-smoke}
+export BRANCH_CANDIDATES=${BRANCH_CANDIDATES:-4}
+export BRANCH_CONTINUATIONS=${BRANCH_CONTINUATIONS:-2}
 export ADAPTER_PATH=${ADAPTER_PATH:-/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/checkpoints/e01_vanilla_grpo/formal-seed42-200-v3/global_step_200/actor/lora_adapter}
 if [ "$BRANCH_STAGE" = smoke ]; then
     export BRANCH_TASK_IDS=${BRANCH_TASK_IDS:-'[0,1,2,4]'}
@@ -20,8 +22,8 @@ branch_overrides=(
     'actor_rollout_ref.rollout.val_kwargs.top_p=1.0'
     '++actor_rollout_ref.rollout.multi_turn.local_branch.enable=true'
     '++actor_rollout_ref.rollout.multi_turn.local_branch.validation_only=true'
-    '++actor_rollout_ref.rollout.multi_turn.local_branch.candidates=4'
-    '++actor_rollout_ref.rollout.multi_turn.local_branch.continuations=2'
+    "++actor_rollout_ref.rollout.multi_turn.local_branch.candidates=$BRANCH_CANDIDATES"
+    "++actor_rollout_ref.rollout.multi_turn.local_branch.continuations=$BRANCH_CONTINUATIONS"
     "++actor_rollout_ref.rollout.multi_turn.local_branch.anchor_turns=$BRANCH_ANCHOR_TURNS"
     "++actor_rollout_ref.rollout.multi_turn.local_branch.task_ids=$BRANCH_TASK_IDS"
     '++actor_rollout_ref.rollout.multi_turn.local_branch.output_dir=${oc.env:RUN_DIR}/branches'
@@ -54,12 +56,13 @@ record = {
     'stage': os.environ['BRANCH_STAGE'],
     'expected_backbones': 40 * int(os.environ['SAMPLES']),
     'task_ids': tasks,
-    'candidates': 4,
-    'continuations': 2,
+    'candidates': int(os.environ['BRANCH_CANDIDATES']),
+    'continuations': int(os.environ['BRANCH_CONTINUATIONS']),
     'anchor_turns': json.loads(os.environ['BRANCH_ANCHOR_TURNS']),
     'adapter_path': os.environ['ADAPTER_PATH'],
     'simulator_model': 'mimo-v2.6-pro',
     'optimizer_updates': 0,
+    'terminal_semantics': 'first_environment_done_v1',
 }
 (run / 'branch_run.json').write_text(json.dumps(record, indent=2) + '\n')
 PY

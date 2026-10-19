@@ -502,6 +502,29 @@ class TauBenchInteraction(BaseInteraction):
         CURRENT_TAU_ENV.set(env)
         CURRENT_TAU_STATE.set(state)
 
+        # Tool termination is handled by TauBenchAgentLoop. Keep this guard so a
+        # direct or stale interaction call cannot advance the simulator or change
+        # the first terminal outcome.
+        if state.get("done", False):
+            total_turns = state["num_user_turns"] + state["num_tool_calls"]
+            return (
+                True,
+                "",
+                self._compute_reward(state),
+                {
+                    "total_reward": state["total_reward"],
+                    "num_turns": total_turns,
+                    "num_tool_calls": state["num_tool_calls"],
+                    "num_user_turns": state["num_user_turns"],
+                    "task_id": state["task_id"],
+                    "reason": "already_done",
+                    "reward_mode": self.reward_mode,
+                    "transferred_to_human": state.get(
+                        "transferred_to_human", False
+                    ),
+                },
+            )
+
         assistant_content = _extract_latest_assistant_content(messages)
 
         # [W5 PRM-Lite v3] 记录 implicit think: assistant 纯文本回复 > 100 chars

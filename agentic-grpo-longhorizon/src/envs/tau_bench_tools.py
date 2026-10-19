@@ -102,6 +102,16 @@ class TauBenchToolBase(BaseTool):
                 f"per trajectory, contextvar fork on asyncio.create_task)."
             )
 
+        # A terminal tau-bench step calculates reward by replaying the ground-truth
+        # actions, which mutates the environment data. Never step that environment
+        # again or the recorded outcome can be replaced by post-terminal behavior.
+        if state.get("done", False):
+            return (
+                ToolResponse(text=""),
+                0.0,
+                {"done": True, "tool": self.name, "skipped": "environment_done"},
+            )
+
         from tau_bench.types import Action
 
         try:

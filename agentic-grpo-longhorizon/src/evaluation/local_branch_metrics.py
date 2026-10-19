@@ -15,6 +15,7 @@ from src.evaluation.run_metrics import (
     summarize_api,
     summarize_tools,
 )
+from src.evaluation.terminal_audit import summarize_terminal_behavior
 
 
 SCHEMA_VERSION = "local_branch_diagnostic_v1"
@@ -55,6 +56,95 @@ def _candidate_values(candidate: dict[str, Any]) -> tuple[list[float], list[dict
         if isinstance(row, dict) and is_binary_score(row.get("outcome_reward"))
     ]
     return rewards, [row for row in continuations if isinstance(row, dict)]
+
+
+def _pooled_action_means(
+    candidates: list[dict[str, Any]], repeat_slice: slice | None = None
+) -> dict[tuple[int, ...], float]:
+    rewards_by_action: dict[tuple[int, ...], list[float]] = {}
+    for candidate in candidates:
+        action = tuple(candidate.get("candidate_token_ids", []))
+        rewards, _ = _candidate_values(candidate)
+        selected = rewards if repeat_slice is None else rewards[repeat_slice]
+        rewards_by_action.setdefault(action, []).extend(selected)
+    return {
+        action: sum(rewards) / len(rewards)
+        for action, rewards in rewards_by_action.items()
+        if rewards
+    }
+
+
+def summarize_action_variation(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    """Separate raw suffix noise from differences between exact token actions."""
+    raw_means = []
+    for candidate in candidates:
+        rewards, _ = _candidate_values(candidate)
+        raw_means.append(sum(rewards) / len(rewards))
+
+    action_means = _pooled_action_means(candidates)
+    pooled_candidate_means = [
+        action_means[tuple(candidate.get("candidate_token_ids", []))]
+        for candidate in candidates
+    ]
+    return {
+        "raw_candidate_mean_rewards": raw_means,
+        "pooled_candidate_mean_rewards": pooled_candidate_means,
+        "unique_actions": len(action_means),
+        "raw_effective": max(raw_means) > min(raw_means),
+        "effective": len(action_means) > 1 and max(action_means.values()) > min(action_means.values()),
+    }
+
+
+def summarize_split_half_stability(
+    groups: list[dict[str, Any]], continuations_per_candidate: int
+) -> dict[str, Any]:
+    """Describe whether independently repeated halves identify the same best action."""
+    available = continuations_per_candidate >= 4
+    midpoint = continuations_per_candidate // 2
+    multi_action_prefixes = 0
+    informative_in_both_halves = 0
+    unique_best_in_both_halves = 0
+    same_unique_best_action = 0
+    ties_in_either_half = 0
+
+    if available:
+        for group in groups:
+            candidates = group["candidates"]
+            first = _pooled_action_means(candidates, slice(0, midpoint))
+            second = _pooled_action_means(candidates, slice(midpoint, continuations_per_candidate))
+            if len(first) < 2:
+                continue
+            multi_action_prefixes += 1
+            first_informative = max(first.values()) > min(first.values())
+            second_informative = max(second.values()) > min(second.values())
+            if not (first_informative and second_informative):
+                continue
+            informative_in_both_halves += 1
+            first_best = {action for action, value in first.items() if value == max(first.values())}
+            second_best = {action for action, value in second.items() if value == max(second.values())}
+            if len(first_best) != 1 or len(second_best) != 1:
+                ties_in_either_half += 1
+                continue
+            unique_best_in_both_halves += 1
+            same_unique_best_action += first_best == second_best
+
+    return {
+        "available": available,
+        "continuations_per_candidate": continuations_per_candidate,
+        "first_half_repeats": midpoint if available else None,
+        "second_half_repeats": continuations_per_candidate - midpoint if available else None,
+        "multi_action_prefixes": multi_action_prefixes,
+        "informative_in_both_halves": informative_in_both_halves,
+        "unique_best_in_both_halves": unique_best_in_both_halves,
+        "ties_in_either_half": ties_in_either_half,
+        "same_unique_best_action": same_unique_best_action,
+        "same_unique_best_action_rate": (
+            same_unique_best_action / unique_best_in_both_halves
+            if unique_best_in_both_halves
+            else None
+        ),
+        "note": "Descriptive split-half stability; it is not a statistical significance test.",
+    }
 
 
 def _validate_complete_group(
@@ -322,6 +412,7 @@ def build_local_branch_summary(run_dir: Path) -> dict[str, Any]:
         and bool(audit_rows)
         and all(row.get("trajectory_id") in allowed_audit_ids for row in audit_rows)
     )
+    terminal_behavior = summarize_terminal_behavior(audit_rows, api_rows)
 
     complete_checks = {
         name: all(result[name] for result in complete_results)
@@ -350,13 +441,18 @@ def build_local_branch_summary(run_dir: Path) -> dict[str, Any]:
         **complete_checks,
         "api_no_terminal_failure": bool(api_rows)
         and all(row.get("success") is True or row.get("retry") is True for row in api_rows),
+        "no_calls_after_successful_terminal": terminal_behavior["passed"],
     }
     engineering_accepted = all(checks.values())
 
     candidate_groups = [
         candidate for row in complete_groups for candidate in row.get("candidates", [])
     ]
-    effective_groups = sum(row.get("effective") is True for row in complete_groups)
+    action_variation_rows = [
+        summarize_action_variation(row["candidates"]) for row in complete_groups
+    ]
+    raw_effective_groups = sum(row["raw_effective"] for row in action_variation_rows)
+    effective_groups = sum(row["effective"] for row in action_variation_rows)
     diversity = []
     for row in complete_groups:
         tokens = [tuple(candidate["candidate_token_ids"]) for candidate in row["candidates"]]
@@ -395,6 +491,9 @@ def build_local_branch_summary(run_dir: Path) -> dict[str, Any]:
         else None
     )
 
+    raw_effective_rate = (
+        raw_effective_groups / len(complete_groups) if complete_groups else None
+    )
     effective_rate = effective_groups / len(complete_groups) if complete_groups else None
     stage = branch_meta.get("stage")
     signal_eligible = stage == "signal" and engineering_accepted and bool(complete_groups)
@@ -415,6 +514,11 @@ def build_local_branch_summary(run_dir: Path) -> dict[str, Any]:
         ),
         "provisional_pass": bool(provisional_pass),
         "effective_branch_rate": effective_rate,
+        "raw_effective_branch_rate": raw_effective_rate,
+        "signal_definition": (
+            "Pool all suffix outcomes for candidates with identical candidate_token_ids, "
+            "then require different pooled means across at least two distinct actions."
+        ),
         "descriptive_threshold": 0.20,
         "statistical_significance_tested": False,
         "note": "The 20% threshold is an engineering screen, not evidence of statistical significance.",
@@ -438,6 +542,21 @@ def build_local_branch_summary(run_dir: Path) -> dict[str, Any]:
             "reward_success_rate": sum(rewards) / len(rewards) if rewards else None,
         },
         "signal_screen": signal_screen,
+        "action_variation": {
+            "raw_effective_groups": raw_effective_groups,
+            "raw_effective_rate": raw_effective_rate,
+            "pooled_effective_groups": effective_groups,
+            "pooled_effective_rate": effective_rate,
+            "groups_with_duplicate_actions": sum(
+                row["unique_actions"] < candidates_per_prefix
+                for row in action_variation_rows
+            ),
+            "definition": "Action identity is exact equality of candidate_token_ids.",
+        },
+        "split_half_stability": summarize_split_half_stability(
+            complete_groups,
+            continuations_per_candidate if _is_int(continuations_per_candidate) else 0,
+        ),
         "candidate_diversity": {
             "mean_unique_fraction": sum(diversity) / len(diversity) if diversity else None,
             "all_candidates_unique_groups": sum(value == 1.0 for value in diversity),
@@ -465,6 +584,7 @@ def build_local_branch_summary(run_dir: Path) -> dict[str, Any]:
             "all": summarize_tools(audit_rows),
             "branches": summarize_tools(branch_audit),
         },
+        "terminal_behavior": terminal_behavior,
         "wall_time_s": {
             "job": job_wall_time_s,
             "branch_episode_sum": episode_wall_time_s,

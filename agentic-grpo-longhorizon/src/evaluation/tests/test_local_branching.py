@@ -106,6 +106,54 @@ def test_anchor_requires_one_more_assistant_and_user_turn_of_budget():
 
 
 @pytest.mark.asyncio
+async def test_branch_stops_after_terminal_tool_without_generation_or_user_call(monkeypatch):
+    state = {"done": False}
+    calls = {"tool": 0, "generation": 0, "interaction": 0}
+
+    class TerminalInteraction:
+        def opsd_feedback_state(self, request_id):
+            return state
+
+        async def calculate_score(self, request_id):
+            return {"outcome_score": 0.0}
+
+    async def fake_tool_handler(self, data):
+        calls["tool"] += 1
+        state["done"] = True
+        return AgentState.GENERATING
+
+    async def unexpected_generation(self, data, sampling_params, ignore_termination=False):
+        calls["generation"] += 1
+        return AgentState.TERMINATED
+
+    async def unexpected_interaction(self, data):
+        calls["interaction"] += 1
+        return AgentState.TERMINATED
+
+    monkeypatch.setattr(
+        AuditedToolAgentLoop, "_handle_processing_tools_state", fake_tool_handler
+    )
+    monkeypatch.setattr(
+        TauBenchAgentLoop, "_handle_generating_state", unexpected_generation
+    )
+    monkeypatch.setattr(
+        TauBenchAgentLoop, "_handle_interacting_state", unexpected_interaction
+    )
+    loop = object.__new__(LocalBranchDiagnosticAgentLoop)
+    data = SimpleNamespace(
+        interaction=TerminalInteraction(), request_id="terminal-branch"
+    )
+
+    reward, termination = await loop._continue_branch(
+        data, AgentState.PROCESSING_TOOLS, {}
+    )
+
+    assert reward == 0.0
+    assert termination == "tool_terminated"
+    assert calls == {"tool": 1, "generation": 0, "interaction": 0}
+
+
+@pytest.mark.asyncio
 async def test_branch_group_generates_each_candidate_once_and_runs_k_times_m(
     monkeypatch,
 ):
@@ -154,7 +202,7 @@ async def test_branch_group_generates_each_candidate_once_and_runs_k_times_m(
         data.assistant_turns += 1
         return float(candidate_index % 2), "interaction_terminated"
 
-    monkeypatch.setattr(AuditedToolAgentLoop, "_handle_generating_state", fake_generate)
+    monkeypatch.setattr(TauBenchAgentLoop, "_handle_generating_state", fake_generate)
     loop._continue_branch = MethodType(fake_continue, loop)
 
     record = await loop._run_local_branches({})
@@ -210,7 +258,7 @@ async def test_branch_continuation_error_still_finalizes_restored_interaction(
     async def failing_continue(self, data, initial_state, sampling_params):
         raise RuntimeError("suffix failed")
 
-    monkeypatch.setattr(AuditedToolAgentLoop, "_handle_generating_state", fake_generate)
+    monkeypatch.setattr(TauBenchAgentLoop, "_handle_generating_state", fake_generate)
     loop._continue_branch = MethodType(failing_continue, loop)
 
     with pytest.raises(RuntimeError, match="suffix failed"):
@@ -241,9 +289,11 @@ async def test_empty_task_ids_selects_all_tasks(monkeypatch, tmp_path):
         ),
     )
     recorded = []
+    termination = "unknown"
 
     async def fake_parent_run(self, sampling_params, **kwargs):
         self.eval_data = SimpleNamespace(request_id="root-trajectory")
+        self.eval_termination = termination
         return SimpleNamespace(extra_fields={})
 
     monkeypatch.setattr(TauBenchAgentLoop, "run", fake_parent_run)
@@ -258,7 +308,15 @@ async def test_empty_task_ids_selects_all_tasks(monkeypatch, tmp_path):
         extra_info={"task_id": 7, "split": "train"},
     )
 
-    assert recorded[0]["skip_reason"] == "anchor_not_reached_or_insufficient_budget"
+    assert recorded[0]["skip_reason"] == "anchor_not_reached"
+
+    termination = "tool_terminated"
+    await loop.run(
+        {},
+        trajectory={"validate": True, "rollout_n": 0},
+        extra_info={"task_id": 7, "split": "train"},
+    )
+    assert recorded[1]["skip_reason"] == "terminal_before_anchor"
 
     with pytest.raises(ValueError, match="restricted to the train split"):
         await loop.run(

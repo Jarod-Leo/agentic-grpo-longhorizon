@@ -192,6 +192,12 @@ def main() -> None:
     )
     metadata = {
         "protocol": PROTOCOL,
+        "terminal_semantics": "first_environment_done_v1",
+        "interaction_config_path": str(
+            method_config.actor_rollout_ref.rollout.multi_turn.interaction_config_path
+        ),
+        "eval_temperature": float(method_config.actor_rollout_ref.rollout.val_kwargs.temperature),
+        "eval_top_p": float(method_config.actor_rollout_ref.rollout.val_kwargs.top_p),
         "config_name": config_name,
         "reward_mode": reward_mode,
         "adv_estimator": adv_estimator,

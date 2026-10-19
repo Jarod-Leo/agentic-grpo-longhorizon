@@ -9,13 +9,14 @@ from pathlib import Path
 
 import yaml
 from src.envs.audited_tool_agent_loop import AuditedToolAgentLoop
+from src.envs.tau_bench_context import CURRENT_TAU_STATE
 from src.envs.opsd_feedback import (
     OPSD_FEEDBACK_VERSION,
     build_opsd_feedback,
     empty_opsd_feedback,
 )
 from tau_bench.envs.airline.wiki import WIKI
-from verl.experimental.agent_loop.tool_agent_loop import AgentState
+from verl.experimental.agent_loop.tool_agent_loop import AgentData, AgentState
 
 
 def append_record(record):
@@ -26,6 +27,18 @@ def append_record(record):
 
 
 class TauBenchAgentLoop(AuditedToolAgentLoop):
+    @staticmethod
+    def _environment_done(data: AgentData) -> bool:
+        if data.interaction is None:
+            return False
+        get_state = getattr(data.interaction, "opsd_feedback_state", None)
+        state = (
+            get_state(data.request_id)
+            if get_state is not None
+            else CURRENT_TAU_STATE.get()
+        )
+        return bool(state and state.get("done", False))
+
     @staticmethod
     def _finite_float(value, name):
         assert isinstance(value, Real) and not isinstance(value, bool), (
@@ -75,6 +88,9 @@ class TauBenchAgentLoop(AuditedToolAgentLoop):
     async def _handle_generating_state(
         self, data, sampling_params, ignore_termination=False
     ):
+        if self._environment_done(data):
+            self.eval_termination = "environment_terminated"
+            return AgentState.TERMINATED
         state = await super()._handle_generating_state(
             data, sampling_params, ignore_termination
         )
@@ -91,12 +107,21 @@ class TauBenchAgentLoop(AuditedToolAgentLoop):
         return state
 
     async def _handle_processing_tools_state(self, data):
+        if self._environment_done(data):
+            self.eval_termination = "environment_terminated"
+            return AgentState.TERMINATED
         state = await super()._handle_processing_tools_state(data)
+        if self._environment_done(data):
+            self.eval_termination = "tool_terminated"
+            return AgentState.TERMINATED
         if state == AgentState.TERMINATED:
             self.eval_termination = "tool_response_budget"
         return state
 
     async def _handle_interacting_state(self, data):
+        if self._environment_done(data):
+            self.eval_termination = "environment_terminated"
+            return AgentState.TERMINATED
         state = await super()._handle_interacting_state(data)
         if state == AgentState.TERMINATED:
             self.eval_termination = "interaction_terminated"
@@ -190,6 +215,7 @@ class TauBenchAgentLoop(AuditedToolAgentLoop):
                 "process_score": process_score,
                 "reward_mode": reward_mode,
                 "termination": self.eval_termination,
+                "terminal_semantics": "first_environment_done_v1",
                 "assistant_turns": data.assistant_turns,
                 "user_turns": data.user_turns,
                 "assistant_tokens": sum(output.response_mask),

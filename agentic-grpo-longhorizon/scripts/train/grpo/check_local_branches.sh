@@ -5,9 +5,14 @@ export REPO=$(pwd)
 export OMP_NUM_THREADS=2 TOKENIZERS_PARALLELISM=false
 export RUN_DIR=$RUN_ROOT/config-check EXP_NAME=local_branch_cpu RAY_TMPDIR=/tmp/local-branch-config
 mkdir -p "$RUN_DIR"
+bash -n scripts/eval/eval_local_branches.sh scripts/eval/eval_qwen3.sh
 python -m pytest -q \
     src/envs/tests/test_tau_bench_snapshot.py \
+    src/envs/tests/test_tau_bench_terminal.py \
     src/evaluation/tests/test_local_branch*.py \
+    src/evaluation/tests/test_terminal_audit.py \
+    src/evaluation/tests/test_qwen3_summary.py \
+    src/evaluation/tests/test_pass_metrics.py \
     src/envs/tests/test_agent_loop_lifecycle.py \
     src/envs/tests/test_tau_bench_joint_loop.py \
     src/envs/tests/test_tau_bench_input.py
@@ -25,16 +30,29 @@ with initialize_config_dir(config_dir=str(root / 'configs/eval/qwen3'), version_
         '++actor_rollout_ref.rollout.multi_turn.local_branch.enable=true',
         '++actor_rollout_ref.rollout.multi_turn.local_branch.task_ids=[0,1,2,4]',
         '++actor_rollout_ref.rollout.multi_turn.local_branch.anchor_turns=[2,4,6]',
+        '++actor_rollout_ref.rollout.multi_turn.local_branch.continuations=8',
     ])
     rollout = omega_conf_to_dataclass(config.actor_rollout_ref.rollout)
     assert rollout.multi_turn.local_branch.enable
     assert list(rollout.multi_turn.local_branch.anchor_turns) == [2,4,6]
+    assert rollout.multi_turn.local_branch.continuations == 8
     assert config.trainer.val_only
     assert not config.data.apply_chat_template_kwargs.enable_thinking
     OmegaConf.save(config, Path(os.environ['RUN_DIR']) / 'config.yaml')
 interaction = yaml.safe_load((root / 'configs/interaction_config/tau_bench_airline_mimo_v26.yaml').read_text())
 assert interaction['interaction'][0]['config']['user_model'] == 'mimo-v2.6-pro'
 print('LOCAL_BRANCH_CONFIG_OK')
+historical_run = os.environ.get('BRANCH_REGRESSION_RUN')
+if historical_run:
+    from src.evaluation.local_branch_metrics import build_local_branch_summary
+
+    old = build_local_branch_summary(Path(historical_run))
+    assert not old['terminal_behavior']['passed']
+    assert not old['engineering_accepted']
+    print('HISTORICAL_TERMINAL_REGRESSION_CAUGHT', {
+        key: value for key, value in old['terminal_behavior'].items()
+        if key != 'violating_trajectory_ids'
+    })
 PY
 tooling=/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/grpo_dynamic_sampling/tooling
 cd "$REPO/../verl"

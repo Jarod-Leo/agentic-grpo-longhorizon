@@ -22,6 +22,7 @@ from src.evaluation.run_metrics import (
     summarize_api,
     summarize_tools,
 )
+from src.evaluation.terminal_audit import summarize_terminal_behavior
 
 
 def finite_number(value) -> bool:
@@ -43,6 +44,7 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
     rows, audit, api, metrics = (inputs[name] for name in inputs)
     ids = [row.get("trajectory_id") for row in rows]
     tools = summarize_tools(audit)
+    terminal_behavior = summarize_terminal_behavior(audit, api)
     mode = meta.get("mode")
     dynamic = meta.get("dynamic_sampling", {})
     dynamic_enabled = mode == "train" and dynamic.get("enabled") is True
@@ -91,6 +93,7 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
         == set(ids),
         "api_no_terminal_failure": bool(api)
         and all(row.get("success") or row.get("retry") for row in api),
+        "no_calls_after_terminal": terminal_behavior["passed"],
     }
     if "reward_mode" in meta:
         reward_mode = meta.get("reward_mode")
@@ -581,6 +584,7 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
             for name in sorted(set(task_splits.values()))
         },
         "tools": tools,
+        "terminal_behavior": terminal_behavior,
         "api": summarize_api(api),
         "learning": learning,
         "evaluations": evaluations,

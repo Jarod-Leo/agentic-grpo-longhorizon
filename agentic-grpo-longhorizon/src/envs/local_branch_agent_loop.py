@@ -6,7 +6,6 @@ import math
 import time
 from typing import Any
 
-from src.envs.audited_tool_agent_loop import AuditedToolAgentLoop
 from src.envs.tau_bench_agent_loop import TauBenchAgentLoop
 from src.envs.tau_bench_context import CURRENT_TAU_STATE
 from src.envs.tau_bench_interaction import record_assistant_content
@@ -15,7 +14,7 @@ from src.evaluation.local_branching import (
     clone_agent_data,
     leave_one_out_advantages,
 )
-from verl.experimental.agent_loop.tool_agent_loop import AgentState, ToolAgentLoop
+from verl.experimental.agent_loop.tool_agent_loop import AgentState
 
 
 class LocalBranchDiagnosticAgentLoop(TauBenchAgentLoop):
@@ -54,7 +53,11 @@ class LocalBranchDiagnosticAgentLoop(TauBenchAgentLoop):
 
     def _eligible_anchor(self, data) -> bool:
         state = CURRENT_TAU_STATE.get() or {}
-        if state.get("done") or state.get("contaminated"):
+        if state.get("contaminated"):
+            self._branch_skip_reason = "contaminated_prefix"
+            return False
+        if state.get("done"):
+            self._branch_skip_reason = "terminal_before_anchor"
             return False
         if self._branch_snapshot is not None:
             return False
@@ -64,10 +67,15 @@ class LocalBranchDiagnosticAgentLoop(TauBenchAgentLoop):
             self.max_assistant_turns
             and data.assistant_turns + 1 >= self.max_assistant_turns
         ):
+            self._branch_skip_reason = "insufficient_budget"
             return False
         if self.max_user_turns and data.user_turns + 1 >= self.max_user_turns:
+            self._branch_skip_reason = "insufficient_budget"
             return False
-        return len(data.response_mask) < self.response_length
+        if len(data.response_mask) >= self.response_length:
+            self._branch_skip_reason = "insufficient_budget"
+            return False
+        return True
 
     async def _handle_generating_state(
         self, data, sampling_params, ignore_termination=False
@@ -109,27 +117,19 @@ class LocalBranchDiagnosticAgentLoop(TauBenchAgentLoop):
         termination = "unknown"
         while state != AgentState.TERMINATED:
             if state == AgentState.GENERATING:
-                state = await AuditedToolAgentLoop._handle_generating_state(
+                state = await TauBenchAgentLoop._handle_generating_state(
                     self, data, sampling_params
                 )
                 if state == AgentState.TERMINATED:
-                    if len(data.response_mask) >= self.response_length:
-                        termination = "response_budget"
-                    elif (
-                        self.max_assistant_turns
-                        and data.assistant_turns >= self.max_assistant_turns
-                    ):
-                        termination = "assistant_turn_limit"
-                    else:
-                        termination = "user_turn_limit"
+                    termination = self.eval_termination
             elif state == AgentState.PROCESSING_TOOLS:
-                state = await ToolAgentLoop._handle_processing_tools_state(self, data)
+                state = await TauBenchAgentLoop._handle_processing_tools_state(self, data)
                 if state == AgentState.TERMINATED:
-                    termination = "tool_response_budget"
+                    termination = self.eval_termination
             elif state == AgentState.INTERACTING:
-                state = await ToolAgentLoop._handle_interacting_state(self, data)
+                state = await TauBenchAgentLoop._handle_interacting_state(self, data)
                 if state == AgentState.TERMINATED:
-                    termination = "interaction_terminated"
+                    termination = self.eval_termination
             else:
                 raise RuntimeError(f"Invalid branch state: {state}")
         raw_score = await data.interaction.calculate_score(data.request_id)
@@ -153,7 +153,7 @@ class LocalBranchDiagnosticAgentLoop(TauBenchAgentLoop):
                 candidate_request_id, captured["interaction"]
             )
             try:
-                candidate_state = await AuditedToolAgentLoop._handle_generating_state(
+                candidate_state = await TauBenchAgentLoop._handle_generating_state(
                     self, candidate_data, sampling_params
                 )
             finally:
@@ -277,6 +277,7 @@ class LocalBranchDiagnosticAgentLoop(TauBenchAgentLoop):
         self._branch_extra_info = kwargs.get("extra_info") or {}
         self._branch_task_id = int(self._branch_extra_info["task_id"])
         self._branch_snapshot = None
+        self._branch_skip_reason = None
         self._branch_enabled = bool(self._branch_config.enable)
 
         anchors = [int(turn) for turn in self._branch_config.anchor_turns]
@@ -317,7 +318,15 @@ class LocalBranchDiagnosticAgentLoop(TauBenchAgentLoop):
         if not self._branch_enabled:
             record = self._skip_record(skip_reason or "disabled")
         elif self._branch_snapshot is None:
-            record = self._skip_record("anchor_not_reached_or_insufficient_budget")
+            reason = self._branch_skip_reason
+            if reason is None:
+                termination = getattr(self, "eval_termination", "unknown")
+                reason = (
+                    "terminal_before_anchor"
+                    if termination in {"tool_terminated", "environment_terminated", "interaction_terminated"}
+                    else "anchor_not_reached"
+                )
+            record = self._skip_record(reason)
         else:
             record = await self._run_local_branches(sampling_params)
         append_branch_group(self._branch_output_dir(self._branch_config), record)
