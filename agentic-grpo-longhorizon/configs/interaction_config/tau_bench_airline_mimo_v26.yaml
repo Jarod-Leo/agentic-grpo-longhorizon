@@ -1,0 +1,17 @@
+interaction:
+  - name: tau_bench_airline
+    class_name: src.envs.tau_bench_interaction.TauBenchInteraction
+    config:
+      env_name: airline
+      task_split: test
+      max_turns: 30
+      reward_mode: ${oc.env:TAU_REWARD_MODE,binary}
+      user_backend: mimo
+      user_strategy: llm
+      user_model: mimo-v2.6
+      user_base_url: https://api.xiaomimimo.com/v1
+      rpm: 100
+      tpm: 10000000
+      max_inflight: 32
+      max_completion_tokens: 1024
+      expected_trajectories: ${oc.env:EXPECTED_TRAJECTORIES,32}

@@ -21,6 +21,7 @@ def main() -> None:
         "agentic-grpo-longhorizon/scripts",
         "agentic-grpo-longhorizon/configs",
         "verl/verl",
+        "verl/pyproject.toml",
         "tau-bench/tau_bench",
         "agentic-grpo-longhorizon/experiments/e00_qwen3_baseline/split.json",
         "verl/tests/trainer/ppo/test_grpo_signal_on_cpu.py",

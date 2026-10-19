@@ -1,0 +1,87 @@
+# 实验 C：GRPO + 局部分支优势
+
+## 目标与边界
+
+研究同一中间状态下的候选动作比较，是否改善长链路工具调用的信用分配。
+本轮授权开展验证实验，不启动从 base 开始的 200 次更新正式训练。
+初始诊断冻结 E01 step 200，仅使用原有 40 个 train 任务；10 个 test 不参与方法选择。
+
+## 模型和协议
+
+- Base：`/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/models/Qwen/Qwen3-8B`。
+- E01 checkpoint：`/projects/_hdd/cabinagentrlarchive/CabinAgent-RL/checkpoints/e01_vanilla_grpo/formal-seed42-200-v3/global_step_200`。
+- 冻结诊断加载上述 checkpoint 的 `actor/lora_adapter`，不加载优化器、不执行梯度更新、不写完整 checkpoint。
+- 新验证使用 MiMo `mimo-v2.6`，100 RPM、1000 万 TPM。历史 E01/B 使用 v2.5，历史数字不能作为新协议下的严格配对对照。
+- 成功判定沿用原始 tau-bench 二元结果，不增加 LLM judge、不更改奖励规则。
+- 候选及续写使用同一冻结模型；训练分布诊断采用 temperature=1、top_p=1，区别于历史 test 的 0.7/0.9。
+
+## 分支方案
+
+在 assistant 生成前保存完整状态。每个分支点采样 K=4 个候选 assistant turn；
+每个候选只生成一次，固定其 token 和工具调用，再从执行该动作之前的相同状态独立续写 M=2 次。
+分支保留已执行工具造成的数据库变更、用户历史、动作历史及已用轮数/token 预算，不能重新获取完整预算。
+首版动作粒度为完整 assistant turn，不声称能区分同一轮内多个工具调用的贡献。
+不同候选允许相同文本，不通过拒绝采样强制多样性。
+
+$$
+\widehat Q_{t,k}=\frac{1}{M}\sum_{m=1}^{M}R_{t,k,m}
+$$
+
+$$
+A^{\mathrm{local}}_{t,k}=\widehat Q_{t,k}-\frac{1}{K-1}\sum_{j\ne k}\widehat Q_{t,j}
+$$
+
+后续训练拟采用 $L=L_{\mathrm{GRPO}}+\lambda L_{\mathrm{local}}$，初始候选权重为 0.25。
+局部项只覆盖候选动作 token；前缀及后续续写不参与该项损失。
+冻结诊断只计算候选回报与局部优势，不能替代梯度 mask/优化器集成验收。
+
+## 验证顺序与门槛
+
+1. CPU：验证数据库/历史/状态隔离，候选固定后独立续写，轮数与预算继承，失败传播和资源清理。
+2. GPU smoke：单卡 Pro6000，少量 train 分支点；核对 K×M 完整性、二元奖励、执行成本和日志。
+3. 固定模型信号诊断：计划 80–120 个 train 分支点。记录有效分支率（候选平均回报不全相同）、候选重复率、同候选续写差异、tokens/API/时间。
+4. 对部分分支点额外续写确认动作排序稳定性。有效分支率约 20% 仅是预先提出的筛选门槛，不是统计显著性标准；M=2 的差异不足以证明有效信用信号。
+5. 信号及成本通过后，才接入局部训练项并从同一 E01 完整 checkpoint 做 20–30 次更新的 C/普通 GRPO 对照。恢复方式、优化器状态、用户模拟器一致。
+
+任何阶段只运行完成，都不等于后续阶段通过。若所有候选同成同败，局部优势为零；若续写随机性大于动作差异，应调整分支位置或 M，再考虑训练。
+短程训练验收关注有限 loss/梯度、目标 mask、KL/长度/工具行为和无明显退化，不要求短期 train 成功率显著上升。
+
+## 正式实验（尚未启动）
+
+通过上述验证后，先做原始 Qwen3-8B 短 smoke，再进行 base 同起点的普通 GRPO 和 C 各 200 次实际更新。
+每 50 次更新保存，每 100 次更新评测 train，最终用同一协议评测 test。
+保持根轨迹 4 任务×8 条；额外分支成本单独报告。补充相近交互预算比较与多个种子；
+需要区分机制时，增加相同分支设计/目标 mask、但采用任务级基线的消融。
+测试不做分支搜索，报告 Pass@1、Pass@4、Pass⁴，以及逐任务结果和交互成本。
+
+## 实现原则
+
+复用当前 veRL 服务、共享评测入口、TauBenchAgentLoop 工具执行与奖励计算。
+新增可复用快照/恢复及诊断子类，避免复制整套训练框架；快照不得深拷贝网络客户端/锁。
+主轨迹和分支分别标识，但 API 账单保留全部真实调用。
+CPU 及 GPU 工作通过 Slurm 执行，提交前冻结源码，运行期间不改快照。
+
+## 运行记录
+
+2026-10-19：开始实现。资源检查：当前无作业，msc QoS 允许 2 张 Pro6000；SSD 约剩 82 GB，HDD 约剩 26 GB。
+官方 `NTUEEECluster/docs/main/agent.md` 与 GitHub 页面均返回 404，本轮沿用仓库集群手册并核对实时 Slurm 规则。
+CPU 首轮 211995：29 项测试通过，随后配置检查发现 local_branch 嵌套对象类型错误，已补 Hydra target。
+CPU 第二轮 212002：31 项测试及配置检查通过；快照未包含 veRL 的 pyproject.toml，Ruff 误用外层规则导致退出，已修复共享快照入口。
+CPU 最终验收作业 212004 使用 source-v3，31 项测试、Hydra 配置解析和 Ruff check/format 全部通过，exit code 0。
+GPU smoke 作业 212006 已提交，单卡 Pro6000、最长 2 小时；信号诊断 212007 依赖 `afterok:212006`，单卡、最长 6 小时。
+后者只在 smoke 的执行与 branch_summary 工程验收均成功后启动，依赖失败自动取消。提交时两个 GPU 作业仍排队，尚无实验指标。
+两项 GPU 作业均冻结模型、使用 source-v3；没有提交短程参数更新或 200 次更新正式训练。
+
+诊断实现另外禁止 test split，并跳过已终止或受污染的前缀。候选和续写均经过原有生成审计。
+MiMo 进度的终止轨迹总数因跳过分支而未知，日志显示 `N/?`；主轨迹与实际分支数量以 branch_summary.json 分别统计。
+
+## 入口与产物
+
+- CPU：`scripts/train/grpo/check_local_branches.sh`，经 `cluster_setup/qwen3_shared/check.sbatch` 运行。
+- GPU：`scripts/eval/eval_local_branches.sh`，经 `cluster_setup/qwen3_shared/run.sbatch` 运行。
+- Smoke：`BRANCH_STAGE=smoke SAMPLES=1`，40 条 train 主轨迹，仅 task 0/1/2/4 在第 2 个 assistant turn 前分支。
+- Signal：`BRANCH_STAGE=signal SAMPLES=3 BRANCH_ANCHOR_TURNS=[2,4,6]`，每个任务的三条主轨迹分别选择一个锚点，最多 120 组；未到达或不合格锚点会记录 skip。
+- 目录：`experiments/grpo_local_branch/`。分支逐组数据：`<run>/eval/branches/worker-*.jsonl`；汇总：`<run>/eval/branch_summary.json`。
+- 原始主轨迹、工具审计和 API 日志分别为 `eval_trajectories.jsonl`、`tool_audit.jsonl`、`api.jsonl`。
+
+branch_summary 的 `engineering_accepted` 是执行完整性验收；`signal_screen` 是描述性筛选，不能代替额外续写稳定性验证或短程训练验收。

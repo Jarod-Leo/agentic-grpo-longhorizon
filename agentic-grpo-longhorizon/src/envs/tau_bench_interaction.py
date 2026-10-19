@@ -35,6 +35,11 @@ from src.envs.tau_bench_context import (
     CURRENT_ASSISTANT_CONTENT,
     make_initial_state,
 )
+from src.envs.tau_bench_snapshot import (
+    TauBenchInteractionSnapshot,
+    capture_interaction,
+    restore_interaction as restore_snapshot,
+)
 
 
 def record_assistant_content(content: str) -> None:
@@ -648,9 +653,9 @@ class TauBenchInteraction(BaseInteraction):
                     "contaminated": state.get("contaminated", False),
                 }
             )
+            expected = self.expected_trajectories if self.expected_trajectories > 0 else "?"
             print(
-                f"MIMO rollout progress {len(self.completed_trajectories)}/{self.expected_trajectories} "
-                f"task_id={state['task_id']}",
+                f"MIMO rollout progress {len(self.completed_trajectories)}/{expected} task_id={state['task_id']}",
                 flush=True,
             )
 
@@ -666,6 +671,33 @@ class TauBenchInteraction(BaseInteraction):
         if entry is None:
             raise RuntimeError(f"Missing live tau-bench state for {instance_id}")
         return entry["state"]
+
+    async def snapshot_interaction(
+        self, instance_id: str
+    ) -> TauBenchInteractionSnapshot:
+        """Capture a reusable branch point without advancing the environment."""
+        entry = self._instance_dict.get(instance_id)
+        if entry is None:
+            raise RuntimeError(f"Missing live tau-bench interaction for {instance_id}")
+        return capture_interaction(entry)
+
+    async def restore_interaction(
+        self, instance_id: str, snapshot: TauBenchInteractionSnapshot
+    ) -> None:
+        """Restore ``snapshot`` under a fresh trajectory id.
+
+        Restoring copies trajectory-local data and simulator history.  It does
+        not call ``get_env``, ``reset`` or ``step``, so prefix write actions are
+        not replayed.
+        """
+        if instance_id in self._instance_dict:
+            raise RuntimeError(f"Tau-bench interaction already exists for {instance_id}")
+
+        entry = restore_snapshot(snapshot, request_id=instance_id)
+        self._instance_dict[instance_id] = entry
+        CURRENT_TAU_ENV.set(entry["env"])
+        CURRENT_TAU_STATE.set(entry["state"])
+        CURRENT_ASSISTANT_CONTENT.set(None)
 
     async def finalize_interaction(self, instance_id: str, **kwargs) -> None:
         """Trajectory 结束时清理 _instance_dict 避免内存泄漏"""

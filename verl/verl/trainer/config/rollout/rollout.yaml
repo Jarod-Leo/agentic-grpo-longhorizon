@@ -192,6 +192,17 @@ multi_turn:
   # Number of repeat rollouts for each interaction
   num_repeat_rollouts: null
 
+  # Optional frozen-policy diagnostics; ordinary training is unchanged.
+  local_branch:
+    _target_: verl.workers.config.LocalBranchConfig
+    enable: false
+    validation_only: true
+    anchor_turns: [2]
+    candidates: 4
+    continuations: 2
+    task_ids: null
+    output_dir: null
+
 # support logging rollout prob for debugging purpose
 # "Truncated importance sampling" requires rollout log probs, set to True when turning on Truncated importance sampling
 calculate_log_probs: False

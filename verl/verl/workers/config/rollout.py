@@ -22,6 +22,7 @@ from verl.utils.profiler import ProfilerConfig
 
 __all__ = [
     "SamplingConfig",
+    "LocalBranchConfig",
     "MultiTurnConfig",
     "CustomAsyncServerConfig",
     "AgentLoopConfig",
@@ -42,6 +43,19 @@ class SamplingConfig(BaseConfig):
 
 
 @dataclass
+class LocalBranchConfig(BaseConfig):
+    """Frozen-policy local branching diagnostics for multi-turn rollouts."""
+
+    enable: bool = False
+    validation_only: bool = True
+    anchor_turns: list[int] = field(default_factory=lambda: [2])
+    candidates: int = 4
+    continuations: int = 2
+    task_ids: Optional[list[int]] = None
+    output_dir: Optional[str] = None
+
+
+@dataclass
 class MultiTurnConfig(BaseConfig):
     _mutable_fields = {"max_assistant_turns", "max_user_turns"}
 
@@ -57,6 +71,7 @@ class MultiTurnConfig(BaseConfig):
     tokenization_sanity_check_mode: str = "strict"
     format: str = "hermes"
     num_repeat_rollouts: Optional[int] = None
+    local_branch: LocalBranchConfig = field(default_factory=LocalBranchConfig)
 
 
 @dataclass
