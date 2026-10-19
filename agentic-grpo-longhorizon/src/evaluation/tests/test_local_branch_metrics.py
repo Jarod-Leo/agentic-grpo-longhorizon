@@ -128,7 +128,7 @@ def _make_run(tmp_path: Path, stage: str = "smoke") -> None:
         "continuations": 2,
         "anchor_turns": [2],
         "adapter_path": "/checkpoint",
-        "simulator_model": "mimo-v2.6",
+        "simulator_model": "mimo-v2.6-pro",
     }
     (tmp_path / "run.json").write_text(json.dumps(run_meta), encoding="utf-8")
     (tmp_path / "branch_run.json").write_text(json.dumps(branch_meta), encoding="utf-8")

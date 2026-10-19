@@ -63,14 +63,15 @@ CPU 及 GPU 工作通过 Slurm 执行，提交前冻结源码，运行期间不�
 
 ## 运行记录
 
-2026-10-19：开始实现。资源检查：当前无作业，msc QoS 允许 2 张 Pro6000；SSD 约剩 82 GB，HDD 约剩 26 GB。
+2026-10-19：开始实现。资源检查：msc QoS 允许 2 张 Pro6000；SSD 约剩 82 GB，HDD 约剩 26 GB。
 官方 `NTUEEECluster/docs/main/agent.md` 与 GitHub 页面均返回 404，本轮沿用仓库集群手册并核对实时 Slurm 规则。
 CPU 首轮 211995：29 项测试通过，随后配置检查发现 local_branch 嵌套对象类型错误，已补 Hydra target。
 CPU 第二轮 212002：31 项测试及配置检查通过；快照未包含 veRL 的 pyproject.toml，Ruff 误用外层规则导致退出，已修复共享快照入口。
 CPU 最终验收作业 212004 使用 source-v3，31 项测试、Hydra 配置解析和 Ruff check/format 全部通过，exit code 0。
 GPU smoke 作业 212006 已提交，单卡 Pro6000、最长 2 小时；信号诊断 212007 依赖 `afterok:212006`，单卡、最长 6 小时。
 后者只在 smoke 的执行与 branch_summary 工程验收均成功后启动，依赖失败自动取消。提交时两个 GPU 作业仍排队，尚无实验指标。
-两项 GPU 作业均冻结模型、使用 source-v3；没有提交短程参数更新或 200 次更新正式训练。
+GPU smoke 212006 使用 v2.6 通用别名收到 HTTP 400，未开始模型生成、未产生分支。官方模型清单确认 API ID 需使用 `mimo-v2.6-pro`、`mimo-v2.6-flash` 或 `mimo-v2.6-pro-ultraspeed`；本实验已改为旗舰 `mimo-v2.6-pro`。
+212007 因依赖失败自动取消。CPU 检查已加入对具体模型 ID 的断言；修复版本等待重新验收。尚未提交短程参数更新或 200 次更新正式训练。
 
 诊断实现另外禁止 test split，并跳过已终止或受污染的前缀。候选和续写均经过原有生成审计。
 MiMo 进度的终止轨迹总数因跳过分支而未知，日志显示 `N/?`；主轨迹与实际分支数量以 branch_summary.json 分别统计。

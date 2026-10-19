@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
+import yaml
 from verl.utils.config import omega_conf_to_dataclass
 
 root = Path(os.environ['REPO'])
@@ -31,6 +32,8 @@ with initialize_config_dir(config_dir=str(root / 'configs/eval/qwen3'), version_
     assert config.trainer.val_only
     assert not config.data.apply_chat_template_kwargs.enable_thinking
     OmegaConf.save(config, Path(os.environ['RUN_DIR']) / 'config.yaml')
+interaction = yaml.safe_load((root / 'configs/interaction_config/tau_bench_airline_mimo_v26.yaml').read_text())
+assert interaction['interaction'][0]['config']['user_model'] == 'mimo-v2.6-pro'
 print('LOCAL_BRANCH_CONFIG_OK')
 PY
 tooling=/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/grpo_dynamic_sampling/tooling

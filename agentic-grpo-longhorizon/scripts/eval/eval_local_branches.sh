@@ -58,7 +58,7 @@ record = {
     'continuations': 2,
     'anchor_turns': json.loads(os.environ['BRANCH_ANCHOR_TURNS']),
     'adapter_path': os.environ['ADAPTER_PATH'],
-    'simulator_model': 'mimo-v2.6',
+    'simulator_model': 'mimo-v2.6-pro',
     'optimizer_updates': 0,
 }
 (run / 'branch_run.json').write_text(json.dumps(record, indent=2) + '\n')
