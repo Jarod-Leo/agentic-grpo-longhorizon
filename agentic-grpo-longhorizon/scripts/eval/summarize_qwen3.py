@@ -23,6 +23,10 @@ from src.evaluation.run_metrics import (
     summarize_tools,
 )
 from src.evaluation.terminal_audit import summarize_terminal_behavior
+from src.evaluation.local_branching import (
+    read_training_branch_records,
+    summarize_training_branches,
+)
 
 
 def finite_number(value) -> bool:
@@ -95,6 +99,24 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
         and all(row.get("success") or row.get("retry") for row in api),
         "no_calls_after_terminal": terminal_behavior["passed"],
     }
+    local_branch = {}
+    local_config = meta.get("local_branch", {})
+    if local_config.get("enable") and local_config.get("trigger") == "critical_prefix":
+        records = read_training_branch_records(run)
+        local_branch = summarize_training_branches(
+            records,
+            rows,
+            candidates=int(local_config["candidates"]),
+            continuations=int(local_config["continuations"]),
+        )
+        checks["local_branch_records_valid"] = local_branch["engineering_accepted"]
+        generation_ids = {
+            row.get("trajectory_id") for row in audit if row.get("event") == "generation"
+        }
+        allowed_ids = set(local_branch["allowed_auxiliary_trajectory_ids"])
+        checks["audit_covers_trajectories"] = (
+            set(ids) <= generation_ids <= set(ids) | allowed_ids
+        )
     if "reward_mode" in meta:
         reward_mode = meta.get("reward_mode")
         coefficient = meta.get("prm_coefficient")
@@ -188,6 +210,9 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
             initial_updates = int(dynamic.get("initial_optimizer_updates", 0))
             initial_skips = int(dynamic.get("initial_skipped_updates", 0))
             budget = int(dynamic.get("trajectory_budget", 0))
+            target_optimizer_updates = int(
+                dynamic.get("target_optimizer_updates", 0)
+            )
             samples = int(meta.get("samples_per_task", 0))
             batch_trajectories = int(meta.get("train_batch_size", 0)) * samples
 
@@ -249,6 +274,9 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
                 if ordered_dynamic
                 else {}
             )
+            expected_training_trajectories = meta.get(
+                "expected_training_trajectories"
+            )
             checks.update(
                 {
                     "dynamic_metrics_per_attempt": bool(steps)
@@ -256,22 +284,15 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
                     and all(len(metric_by_step[step]) == 1 for step in steps),
                     "dynamic_counters_consistent": counters_valid,
                     "dynamic_groups_consistent": groups_valid,
-                    "dynamic_budget_exhausted": bool(ordered_dynamic)
-                    and previous_generated == budget
-                    and final_data.get("dynamic_sampling/budget_exhausted") == 1
-                    and all(
-                        row.get("data", row).get(
-                            "dynamic_sampling/budget_exhausted"
-                        )
-                        == 0
-                        for row in ordered_dynamic[:-1]
-                    ),
                     "dynamic_all_rollouts_recorded": sum(
                         row.get("data", row).get("dynamic_sampling/generated_this_step", -1)
                         for row in ordered_dynamic
                     )
                     == len(training_rows)
-                    == meta.get("expected_training_trajectories"),
+                    and (
+                        expected_training_trajectories is None
+                        or len(training_rows) == expected_training_trajectories
+                    ),
                     "groups_per_step": all(
                         len(grouped[step])
                         == metric_by_step[step][0]
@@ -288,6 +309,43 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
                     "actor_updates_per_step": actor_steps == update_steps,
                 }
             )
+            if budget > 0:
+                checks["dynamic_budget_exhausted"] = (
+                    bool(ordered_dynamic)
+                    and previous_generated == budget
+                    and final_data.get("dynamic_sampling/budget_exhausted") == 1
+                    and all(
+                        row.get("data", row).get(
+                            "dynamic_sampling/budget_exhausted"
+                        )
+                        == 0
+                        for row in ordered_dynamic[:-1]
+                    )
+                )
+            if target_optimizer_updates > 0:
+                checks["dynamic_target_optimizer_updates"] = (
+                    bool(ordered_dynamic)
+                    and previous_updates == target_optimizer_updates
+                    and final_data.get("dynamic_sampling/target_optimizer_updates")
+                    == target_optimizer_updates
+                    and final_data.get("dynamic_sampling/target_reached") == 1
+                    and final_data.get("dynamic_sampling/budget_exhausted") == 0
+                    and all(
+                        row.get("data", row).get(
+                            "dynamic_sampling/target_optimizer_updates"
+                        )
+                        == target_optimizer_updates
+                        and row.get("data", row).get(
+                            "dynamic_sampling/target_reached"
+                        )
+                        == 0
+                        and row.get("data", row).get(
+                            "dynamic_sampling/optimizer_updates", 0
+                        )
+                        < target_optimizer_updates
+                        for row in ordered_dynamic[:-1]
+                    )
+                )
         else:
             checks["groups_per_step"] = all(
                 len(batch) == meta["train_batch_size"] * meta["samples_per_task"]
@@ -560,6 +618,24 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
             learning["note"] = (
                 "No signal observed in enabled training objectives; zero GRPO advantage is valid when group rewards are constant."
             )
+        if local_config.get("enable") and local_config.get("emit_training_fields"):
+            required = {
+                "actor/local_branch_loss",
+                "actor/local_branch_coef",
+                "actor/local_branch_actions",
+                "actor/local_branch_tokens",
+                "actor/local_branch_advantage_mean",
+            }
+            checks["local_branch_actor_metrics"] = bool(actor_metrics) and all(
+                required <= row.get("data", {}).keys()
+                and all(finite_number(row["data"][key]) for key in required)
+                for row in actor_metrics
+            )
+            learning["reward_signal_observed"] = learning["signal_observed"]
+            learning["local_signal_observed"] = local_branch.get("nonzero_signal_groups", 0) > 0
+            learning["signal_observed"] |= learning["local_signal_observed"]
+            if learning["signal_observed"]:
+                learning.pop("note", None)
     else:
         checks["known_mode"] = False
     log = (
@@ -586,7 +662,12 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
         "tools": tools,
         "terminal_behavior": terminal_behavior,
         "api": summarize_api(api),
+        "api_by_role": {
+            role: summarize_api([row for row in api if row.get("role", "user") == role])
+            for role in sorted({row.get("role", "user") for row in api})
+        },
         "learning": learning,
+        "local_branch": local_branch,
         "evaluations": evaluations,
         "lora_initialization": initializations,
         "termination_reasons": dict(Counter(row.get("termination") for row in rows)),

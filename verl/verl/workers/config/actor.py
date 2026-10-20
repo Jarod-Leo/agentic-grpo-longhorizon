@@ -26,7 +26,14 @@ from .engine import FSDPEngineConfig, McoreEngineConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
-__all__ = ["PolicyLossConfig", "DistillationConfig", "ActorConfig", "FSDPActorConfig", "McoreActorConfig"]
+__all__ = [
+    "PolicyLossConfig",
+    "DistillationConfig",
+    "LocalBranchLossConfig",
+    "ActorConfig",
+    "FSDPActorConfig",
+    "McoreActorConfig",
+]
 
 
 @dataclass
@@ -68,6 +75,18 @@ class DistillationConfig(BaseConfig):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"distillation.{name} must be finite and non-negative, got {value}")
+
+
+@dataclass
+class LocalBranchLossConfig(BaseConfig):
+    """Independent clipped-PG term for one selected root action per prompt."""
+
+    enabled: bool = False
+    coef: float = 0.25
+
+    def __post_init__(self):
+        if not math.isfinite(self.coef) or self.coef < 0:
+            raise ValueError(f"local_branch_loss.coef must be finite and non-negative, got {self.coef}")
 
 
 @dataclass
@@ -123,6 +142,7 @@ class ActorConfig(BaseConfig):
     freeze_vision_tower: bool = False
     policy_loss: PolicyLossConfig = field(default_factory=PolicyLossConfig)
     distillation: DistillationConfig = field(default_factory=DistillationConfig)
+    local_branch_loss: LocalBranchLossConfig = field(default_factory=LocalBranchLossConfig)
     clip_ratio_c: float = 3.0
     loss_agg_mode: str = "token-mean"
     entropy_coeff: float = 0

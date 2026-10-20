@@ -77,6 +77,36 @@ def test_holdout_and_nonbinary_scores_rejected(tmp_path):
     assert not checks["task_split_matches"] and not checks["scores_binary_finite"]
 
 
+def test_branch_audit_allows_only_validated_auxiliary_ids(tmp_path, monkeypatch):
+    write_run(tmp_path, [0] * 8)
+    path = tmp_path / "run.json"
+    meta = json.loads(path.read_text())
+    meta["local_branch"] = {
+        "enable": True, "trigger": "critical_prefix", "candidates": 4, "continuations": 8,
+    }
+    path.write_text(json.dumps(meta))
+    monkeypatch.setitem(build_summary.__globals__, "summarize_training_branches", lambda *a, **k: {
+        "engineering_accepted": True,
+        "allowed_auxiliary_trajectory_ids": ["t-0-branch-c1-m0"],
+    })
+    audit = tmp_path / "tool_audit.jsonl"
+    with audit.open("a") as stream:
+        stream.write(json.dumps({"event": "generation", "trajectory_id": "t-0-branch-c1-m0"}) + "\n")
+    assert build_summary(tmp_path)[0]["accepted"]
+    with audit.open("a") as stream:
+        stream.write(json.dumps({"event": "generation", "trajectory_id": "unexplained"}) + "\n")
+    assert not build_summary(tmp_path)[0]["checks"]["audit_covers_trajectories"]
+
+
+def test_teacher_and_user_api_costs_are_separate(tmp_path):
+    write_run(tmp_path, [0] * 8)
+    api = [{"success": True, "role": role} for role in ("teacher", "teacher", "user")]
+    (tmp_path / "api.jsonl").write_text("".join(json.dumps(row) + "\n" for row in api))
+    result = build_summary(tmp_path)[0]
+    assert set(result["api_by_role"]) == {"teacher", "user"}
+    assert result["accepted"]
+
+
 def test_periodic_eval_and_external_checkpoints(tmp_path):
     """Train and validation at the same step must not form one GRPO group."""
     write_run(tmp_path, [0] * 8)
@@ -295,6 +325,18 @@ def test_dynamic_sampling_counts_filtered_rollouts_and_actual_final_step(tmp_pat
     path = tmp_path / "eval_trajectories.jsonl"
     path.write_text("".join(json.dumps(row) + "\n" for row in rows[:-5] + rows[-4:]))
     assert not build_summary(tmp_path)[0]["checks"]["dynamic_all_rollouts_recorded"]
+
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    meta["expected_trajectories"] = None
+    meta["expected_training_trajectories"] = None
+    meta["dynamic_sampling"].update(
+        trajectory_budget=0,
+        target_optimizer_updates=2,
+        stop_condition="target_optimizer_updates",
+    )
+    (tmp_path / "run.json").write_text(json.dumps(meta))
+    target_result, _ = build_summary(tmp_path)
+    assert not target_result["checks"]["dynamic_target_optimizer_updates"]
 
 
 def write_joint_run(tmp_path, mode="train"):

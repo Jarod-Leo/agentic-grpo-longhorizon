@@ -45,7 +45,11 @@ from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pa
 from verl.workers.actor import BasePPOActor
 from verl.workers.config import ActorConfig
 
-__all__ = ["DataParallelPPOActor"]
+__all__ = [
+    "DataParallelPPOActor",
+    "compute_local_branch_pg_loss",
+    "local_branch_microbatch_scale",
+]
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -54,6 +58,35 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 def dynamic_microbatch_loss_scale(micro_batch_size: int, mini_batch_size: int) -> float:
     """Weight a dynamic micro-batch against the mini-batch actually being updated."""
     return micro_batch_size / mini_batch_size
+
+
+def local_branch_microbatch_scale(local_mask: torch.Tensor, mini_batch_actions: int) -> float:
+    """Normalize a micro-batch over selected root actions in its mini-batch."""
+    active_actions = int(local_mask.bool().any(dim=-1).sum().item())
+    return active_actions / mini_batch_actions if mini_batch_actions else 0.0
+
+
+def compute_local_branch_pg_loss(
+    *,
+    log_prob: torch.Tensor,
+    fixed_old_log_prob: torch.Tensor,
+    local_advantages: torch.Tensor,
+    local_mask: torch.Tensor,
+    config: ActorConfig,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Compute clipped PG only on the selected root action tokens."""
+    if not local_mask.bool().any():
+        return (log_prob * 0).sum(), {}
+    policy_loss_fn = get_policy_loss_fn(config.policy_loss.get("loss_mode", "vanilla"))
+    return policy_loss_fn(
+        old_log_prob=fixed_old_log_prob,
+        log_prob=log_prob,
+        advantages=local_advantages,
+        response_mask=local_mask,
+        loss_agg_mode="seq-mean-token-mean",
+        config=config,
+        rollout_is_weights=None,
+    )
 
 
 class DataParallelPPOActor(BasePPOActor):
@@ -395,6 +428,18 @@ class DataParallelPPOActor(BasePPOActor):
             raise ValueError(f"Invalid distillation.loss_type: {loss_type}")
         skill_sd_enabled = distillation_enabled and loss_type == "skill_sd"
         compute_distillation = distillation_enabled and opd_coef != 0
+        local_config = self.config.get("local_branch_loss", None)
+        local_enabled = bool(local_config is not None and local_config.get("enabled", False))
+        local_coef = float(local_config.get("coef", 0.25)) if local_enabled else 0.0
+        if local_enabled:
+            if self.config.ppo_epochs != 1:
+                raise ValueError("Local branch loss supports ppo_epochs=1 only")
+            if self.config.loss_agg_mode != "seq-mean-token-mean":
+                raise ValueError("Local branch loss requires seq-mean-token-mean")
+            if self.config.policy_loss.get("loss_mode", "vanilla") != "vanilla":
+                raise ValueError("Local branch loss supports vanilla PPO only")
+            if distillation_enabled:
+                raise ValueError("Local branch loss and token distillation cannot be combined")
 
         select_keys = [
             "responses",
@@ -405,6 +450,8 @@ class DataParallelPPOActor(BasePPOActor):
             "old_log_probs",
             "advantages",
         ]
+        if local_enabled:
+            select_keys.extend(["local_branch_mask", "local_branch_advantages"])
         if compute_distillation:
             select_keys.append("teacher_log_probs")
         if self.config.use_kl_loss:
@@ -441,6 +488,26 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
 
                 self.actor_optimizer.zero_grad()
+
+                if local_enabled:
+                    mini_local_mask = mini_batch.batch["local_branch_mask"].bool()
+                    mini_local_actions = int(mini_local_mask.any(dim=-1).sum().item())
+                    mini_local_tokens = int(mini_local_mask.sum().item())
+                    mini_local_advantages = mini_batch.batch["local_branch_advantages"]
+                    action_values = (mini_local_advantages * mini_local_mask).sum(dim=-1) / mini_local_mask.sum(
+                        dim=-1
+                    ).clamp_min(1)
+                    active_values = action_values[mini_local_mask.any(dim=-1)]
+                    local_metrics = {
+                        "actor/local_branch_loss": 0.0,
+                        "actor/local_branch_coef": local_coef,
+                        "actor/local_branch_actions": mini_local_actions,
+                        "actor/local_branch_tokens": mini_local_tokens,
+                        "actor/local_branch_nonzero_actions": int((active_values != 0).sum().item()),
+                        "actor/local_branch_advantage_mean": (
+                            active_values.mean().item() if mini_local_actions else 0.0
+                        ),
+                    }
 
                 if skill_sd_enabled:
                     # Report one accumulated loss per minibatch. Trainer metrics
@@ -541,6 +608,18 @@ class DataParallelPPOActor(BasePPOActor):
                         pg_loss = differentiable_zero
                         pg_metrics = {}
                     micro_batch_metrics.update(pg_metrics)
+
+                    if local_enabled:
+                        local_mask = model_inputs["local_branch_mask"]
+                        local_loss, _ = compute_local_branch_pg_loss(
+                            log_prob=log_prob,
+                            fixed_old_log_prob=fixed_old_log_prob,
+                            local_advantages=model_inputs["local_branch_advantages"],
+                            local_mask=local_mask,
+                            config=self.config,
+                        )
+                        local_loss_scale_factor = local_branch_microbatch_scale(local_mask, mini_local_actions)
+                        local_metrics["actor/local_branch_loss"] += local_loss.detach().item() * local_loss_scale_factor
 
                     if compute_distillation:
                         if skill_sd_enabled:
@@ -653,6 +732,8 @@ class DataParallelPPOActor(BasePPOActor):
                         loss = policy_loss * loss_scale_factor
                     if skill_sd_enabled:
                         loss = loss + opd_coef * distillation_loss * skill_sd_loss_scale_factor
+                    if local_enabled:
+                        loss = loss + local_coef * local_loss * local_loss_scale_factor
                     if self.scaler is not None:
                         self.scaler.scale(loss).backward()
                     else:
@@ -668,6 +749,8 @@ class DataParallelPPOActor(BasePPOActor):
                     skill_sd_metrics["actor/rl_logprob_grad_norm"] = rl_logprob_grad_sq**0.5
                     skill_sd_metrics["actor/skill_sd_logprob_grad_norm"] = skill_sd_logprob_grad_sq**0.5
                     mini_batch_metrics.update(skill_sd_metrics)
+                if local_enabled:
+                    mini_batch_metrics.update(local_metrics)
                 append_to_dict(metrics, mini_batch_metrics)
         self.actor_optimizer.zero_grad()
         return metrics

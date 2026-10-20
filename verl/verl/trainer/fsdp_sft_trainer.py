@@ -23,6 +23,7 @@ import os
 os.environ["NCCL_DEBUG"] = "WARN"
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
+import json
 import logging
 import re
 import time
@@ -33,6 +34,7 @@ import torch
 import torch.distributed
 from omegaconf import DictConfig, OmegaConf
 from peft import LoraConfig, TaskType, get_peft_model
+from safetensors.torch import save_file
 from tensordict import TensorDict
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
@@ -41,7 +43,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.utils.data import Dataset, DistributedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
-from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
+from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel, set_seed
 
 import verl.utils.hdfs_io as hdfs_io
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
@@ -61,6 +63,7 @@ from verl.utils.fsdp_utils import (
     get_fsdp_wrap_policy,
     get_init_weight_context_manager,
     init_fn,
+    layered_summon_lora_params,
 )
 from verl.utils.logger import log_with_rank
 from verl.utils.profiler import log_gpu_memory_usage
@@ -552,6 +555,26 @@ class FSDPSFTTrainer:
             local_path=local_global_step_folder, global_step=step, max_ckpt_to_keep=max_ckpt_to_keep
         )
 
+        if self.lora:
+            lora_path = os.path.join(local_global_step_folder, "lora_adapter")
+            peft_config = self.model.peft_config["default"].to_dict()
+            for key in ("task_type", "peft_type"):
+                value = peft_config.get(key)
+                if hasattr(value, "value"):
+                    peft_config[key] = value.value
+            if isinstance(peft_config.get("target_modules"), set):
+                peft_config["target_modules"] = sorted(peft_config["target_modules"])
+            lora_params = layered_summon_lora_params(self.fsdp_model)
+            if self.device_mesh.get_rank() == 0:
+                if not lora_params:
+                    raise RuntimeError("No LoRA parameters found in the SFT checkpoint")
+                local_mkdir_safe(lora_path)
+                save_file(lora_params, os.path.join(lora_path, "adapter_model.safetensors"))
+                with open(os.path.join(lora_path, "adapter_config.json"), "w", encoding="utf-8") as stream:
+                    json.dump(peft_config, stream, ensure_ascii=False, indent=2)
+                print(f"Saved LoRA adapter to: {lora_path}")
+            torch.distributed.barrier()
+
         # Save dataloader state
         if self.device_mesh.get_rank() == 0:
             local_mkdir_safe(local_global_step_folder)
@@ -797,6 +820,7 @@ class FSDPSFTTrainer:
 
 
 def run_sft(config):
+    set_seed(int(config.trainer.seed))
     device_name = get_device_name()
     local_rank, rank, world_size = initialize_global_process_group()
 

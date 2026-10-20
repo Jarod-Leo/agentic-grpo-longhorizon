@@ -48,9 +48,18 @@ class LocalBranchConfig(BaseConfig):
 
     enable: bool = False
     validation_only: bool = True
+    trigger: str = "anchor_turn"
     anchor_turns: list[int] = field(default_factory=lambda: [2])
+    trigger_tools: list[str] = field(
+        default_factory=lambda: [
+            "get_reservation_details",
+            "search_direct_flight",
+            "search_onestop_flight",
+        ]
+    )
     candidates: int = 4
     continuations: int = 2
+    emit_training_fields: bool = False
     task_ids: Optional[list[int]] = None
     output_dir: Optional[str] = None
 

@@ -65,6 +65,18 @@ policy_loss:
   # KL divergence penalty coefficient
   ppo_kl_coef: 0.1
 
+# Independent clipped-PG term for selected local-branch root actions
+local_branch_loss:
+
+  # # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.LocalBranchLossConfig
+
+  # Whether to add the local action loss
+  enabled: false
+
+  # Weight of the local action loss
+  coef: 0.25
+
 # Constant C in Dual-clip PPO; clips when advantage < 0 and ratio > C
 clip_ratio_c: 3.0
 

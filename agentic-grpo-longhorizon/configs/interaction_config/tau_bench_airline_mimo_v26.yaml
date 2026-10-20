@@ -14,4 +14,5 @@ interaction:
       tpm: 10000000
       max_inflight: 32
       max_completion_tokens: 1024
+      limiter_group: verified_sft_mimo_v26
       expected_trajectories: ${oc.env:EXPECTED_TRAJECTORIES,32}

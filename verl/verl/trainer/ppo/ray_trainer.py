@@ -47,6 +47,7 @@ from verl.trainer.ppo.dynamic_sampling import (
     DynamicSamplingState,
     can_generate_batch,
     filter_mixed_groups,
+    optimizer_target_reached,
     sampling_metrics,
 )
 from verl.trainer.ppo.metric_utils import (
@@ -182,6 +183,75 @@ def compute_response_mask(data: DataProto):
     response_length = responses.size(1)
     attention_mask = data.batch["attention_mask"]
     return attention_mask[:, -response_length:]
+
+
+def tensorize_local_branch_fields(data: DataProto) -> DataProto:
+    """Pad and validate root-action local fields emitted by the agent loop."""
+    names = (
+        "local_branch_mask",
+        "local_branch_advantages",
+        "local_branch_candidate0_token_ids",
+    )
+    present = [name in data.non_tensor_batch for name in names]
+    if not any(present):
+        return data
+    if not all(present):
+        raise ValueError("Incomplete local branch fields in rollout batch")
+
+    raw_masks = data.non_tensor_batch.pop("local_branch_mask")
+    raw_advantages = data.non_tensor_batch.pop("local_branch_advantages")
+    raw_tokens = data.non_tensor_batch.pop("local_branch_candidate0_token_ids")
+    data.non_tensor_batch.pop("local_branch_record_id", None)
+    response_mask = data.batch["response_mask"]
+    responses = data.batch["responses"]
+    response_width = responses.shape[1]
+    response_attention = data.batch["attention_mask"][:, -response_width:]
+    local_mask = torch.zeros_like(response_mask)
+    local_advantages = torch.zeros_like(response_mask, dtype=torch.float32)
+
+    for index, (mask_values, advantage_values, candidate_tokens) in enumerate(
+        zip(raw_masks, raw_advantages, raw_tokens, strict=True)
+    ):
+        fields = (mask_values, advantage_values, candidate_tokens)
+        if all(value is None for value in fields):
+            continue
+        if any(value is None for value in fields):
+            raise ValueError(f"Incomplete local branch sample at index {index}")
+        mask_values = list(mask_values)
+        advantage_values = list(advantage_values)
+        candidate_tokens = list(candidate_tokens)
+        valid_length = int(response_attention[index].sum().item())
+        if len(mask_values) != valid_length or len(advantage_values) != valid_length:
+            raise ValueError(f"Local branch fields at index {index} do not match response length")
+        mask = torch.as_tensor(
+            mask_values,
+            dtype=response_mask.dtype,
+            device=response_mask.device,
+        )
+        if not torch.all((mask == 0) | (mask == 1)):
+            raise ValueError("local_branch_mask must be binary")
+        mask = mask.to(response_mask.dtype)
+        assistant_mask = response_mask[index, :valid_length]
+        if torch.any(mask.bool() & ~assistant_mask.bool()):
+            raise ValueError("Local branch mask includes non-assistant tokens")
+        advantages = torch.as_tensor(
+            advantage_values,
+            dtype=torch.float32,
+            device=response_mask.device,
+        )
+        if not torch.isfinite(advantages).all():
+            raise ValueError("Local branch advantages must be finite")
+        if torch.any(advantages[~mask.bool()] != 0):
+            raise ValueError("Local branch advantage is nonzero outside its action")
+        selected_tokens = responses[index, :valid_length][mask.bool()].tolist()
+        if selected_tokens != list(candidate_tokens):
+            raise ValueError("Local candidate 0 tokens differ from the root response span")
+        local_mask[index, :valid_length] = mask
+        local_advantages[index, :valid_length] = advantages
+
+    data.batch["local_branch_mask"] = local_mask
+    data.batch["local_branch_advantages"] = local_advantages
+    return data
 
 
 def compute_advantage(
@@ -366,6 +436,13 @@ class RayPPOTrainer:
                 raise ValueError("dynamic sampling requires a positive max_num_gen_batches")
             if not filter_config.get("metric"):
                 raise ValueError("dynamic sampling requires algorithm.filter_groups.metric")
+            trajectory_budget = int(filter_config.get("trajectory_budget", 0))
+            target_optimizer_updates = int(filter_config.get("target_optimizer_updates", 0))
+            if (trajectory_budget > 0) == (target_optimizer_updates > 0):
+                raise ValueError(
+                    "dynamic sampling requires exactly one positive stop condition: "
+                    "trajectory_budget or target_optimizer_updates"
+                )
 
     def _get_distillation_state(self):
         """Instantiate optional state only for active skill distillation."""
@@ -1164,6 +1241,7 @@ class RayPPOTrainer:
         batch = batch.union(gen_batch_output)
         if "response_mask" not in batch.batch.keys():
             batch.batch["response_mask"] = compute_response_mask(batch)
+        batch = tensorize_local_branch_fields(batch)
 
         with marked_timer("reward", timing_raw, color="yellow"):
             if self.use_rm and "rm_scores" not in batch.batch.keys():
@@ -1366,6 +1444,9 @@ class RayPPOTrainer:
 
         filter_config = self.config.algorithm.get("filter_groups")
         dynamic_enabled = bool(filter_config and filter_config.get("enable", False))
+        target_optimizer_updates = int(filter_config.get("target_optimizer_updates", 0)) if dynamic_enabled else 0
+        if optimizer_target_reached(self.dynamic_sampling_state, target_optimizer_updates):
+            raise ValueError("Dynamic-sampling checkpoint already reached target_optimizer_updates")
         training_stream = self._training_batches()
         for epoch, batch_dict in training_stream:
             metrics = {}
@@ -1531,6 +1612,10 @@ class RayPPOTrainer:
                 self.dynamic_sampling_state.global_step = self.global_steps
                 metrics["dynamic_sampling/optimizer_updates"] = self.dynamic_sampling_state.optimizer_updates
                 metrics["dynamic_sampling/skipped_updates"] = self.dynamic_sampling_state.skipped_updates
+                target_reached = optimizer_target_reached(self.dynamic_sampling_state, target_optimizer_updates)
+                metrics["dynamic_sampling/target_optimizer_updates"] = target_optimizer_updates
+                metrics["dynamic_sampling/target_reached"] = int(target_reached)
+                is_last_step = is_last_step or target_reached
 
             # validate
             if (

@@ -55,6 +55,17 @@ def make_agent_data(interaction):
     return data
 
 
+def make_root_candidate(prefix_data, token=99):
+    candidate = clone_agent_data(prefix_data, prefix_data.request_id)
+    candidate.response_ids = [token]
+    candidate.prompt_ids.append(token)
+    candidate.response_mask.append(1)
+    candidate.assistant_turns += 1
+    candidate.messages.append({"role": "assistant", "content": str(token)})
+    candidate.tool_calls = []
+    return candidate
+
+
 def test_clone_agent_data_keeps_service_but_isolates_mutable_state():
     interaction = FakeInteraction()
     source = make_agent_data(interaction)
@@ -165,6 +176,11 @@ async def test_branch_group_generates_each_candidate_once_and_runs_k_times_m(
     loop._branch_snapshot = {
         "agent_data": prefix_data,
         "interaction": object(),
+        "trigger": "after_tool_error",
+        "root_candidate_data": make_root_candidate(prefix_data),
+        "root_candidate_state": AgentState.INTERACTING,
+        "root_action_token_ids": [99],
+        "root_action_span": [1, 2],
         "prefix": {
             "assistant_turns": 1,
             "user_turns": 1,
@@ -207,13 +223,15 @@ async def test_branch_group_generates_each_candidate_once_and_runs_k_times_m(
 
     record = await loop._run_local_branches({})
 
-    assert len(generated) == 4
-    assert len(interaction.restored) == 4 + 4 * 2
+    assert len(generated) == 3
+    assert len(interaction.restored) == 3 + 4 * 2
     assert interaction.finalized == [
         request_id for request_id, _ in interaction.restored
     ]
     assert record["cost"]["branch_episodes"] == 8
     assert record["effective"] is True
+    assert record["candidates"][0]["candidate_token_ids"] == [99]
+    assert record["root_action_token_ids"] == [99]
     assert [item["mean_reward"] for item in record["candidates"]] == [
         0.0,
         1.0,
@@ -221,7 +239,8 @@ async def test_branch_group_generates_each_candidate_once_and_runs_k_times_m(
         1.0,
     ]
     for candidate_index, repeated_tokens in continued_candidate_tokens.items():
-        assert repeated_tokens == [[100 + candidate_index], [100 + candidate_index]]
+        expected = 99 if candidate_index == 0 else 100 + candidate_index
+        assert repeated_tokens == [[expected], [expected]]
 
 
 @pytest.mark.asyncio
@@ -235,6 +254,13 @@ async def test_branch_continuation_error_still_finalizes_restored_interaction(
     loop._branch_snapshot = {
         "agent_data": make_agent_data(interaction),
         "interaction": object(),
+        "trigger": "after_tool_error",
+        "root_candidate_data": make_root_candidate(
+            make_agent_data(interaction)
+        ),
+        "root_candidate_state": AgentState.INTERACTING,
+        "root_action_token_ids": [99],
+        "root_action_span": [1, 2],
         "prefix": {
             "assistant_turns": 1,
             "user_turns": 1,
@@ -264,7 +290,7 @@ async def test_branch_continuation_error_still_finalizes_restored_interaction(
     with pytest.raises(RuntimeError, match="suffix failed"):
         await loop._run_local_branches({})
 
-    assert len(interaction.restored) == 2
+    assert len(interaction.restored) == 1
     assert interaction.finalized == [
         request_id for request_id, _ in interaction.restored
     ]

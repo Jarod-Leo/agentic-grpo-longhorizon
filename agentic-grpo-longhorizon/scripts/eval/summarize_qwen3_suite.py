@@ -70,7 +70,12 @@ def result_row(report_path: Path, model: dict, split: str) -> list[str]:
             "—",
         ]
 
-    split_row = summary.get("splits", {}).get(split)
+    train_step = model.get("train_step") if split == "train" else None
+    split_row = (
+        summary.get("evaluations", {}).get(str(train_step))
+        if train_step is not None
+        else summary.get("splits", {}).get(split)
+    )
     if not isinstance(split_row, dict):
         return [
             model["name"],
@@ -119,7 +124,7 @@ def build_report(manifest: dict, report_path: Path) -> str:
         raise ValueError("Manifest protocol must be an object and models must be a list")
 
     lines = [
-        "# 修复终止语义后的模型复评",
+        "# " + str(manifest.get("title", "修复终止语义后的模型复评")),
         "",
         "所有结果直接读取各次评测生成的 `summary.json`；待评测和未验收结果均保留在表中。",
         "",

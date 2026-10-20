@@ -27,6 +27,10 @@ def append_record(record):
 
 
 class TauBenchAgentLoop(AuditedToolAgentLoop):
+    def _trajectory_record_extra(self, data, output):
+        """Allow collection loops to add provenance without copying this loop."""
+        return {}
+
     @staticmethod
     def _environment_done(data: AgentData) -> bool:
         if data.interaction is None:
@@ -229,6 +233,7 @@ class TauBenchAgentLoop(AuditedToolAgentLoop):
                 ),
                 "schema_verified": True,
             }
+            record.update(self._trajectory_record_extra(data, output))
             if opsd_feedback is not None:
                 record["opsd_feedback"] = opsd_feedback
             append_record(record)

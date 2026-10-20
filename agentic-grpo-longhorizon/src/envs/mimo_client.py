@@ -13,6 +13,10 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 
+_SHARED_BUDGETS = {}
+_SHARED_BUDGETS_LOCK = threading.Lock()
+
+
 class UserSimulatorAPIError(RuntimeError):
     """Infrastructure errors must not become task rewards."""
 
@@ -76,9 +80,25 @@ class MimoClient:
     def __init__(self, config, sdk=None):
         self.model = config.get("user_model", "mimo-v2.5")
         self.max_tokens = int(config.get("max_completion_tokens", 1024))
+        self.max_attempts = int(os.environ.get("MIMO_MAX_ATTEMPTS", "4"))
+        if self.max_attempts < 1:
+            raise ValueError("MIMO_MAX_ATTEMPTS must be at least 1")
         self.response_format = config.get("response_format")
-        self.limiter = RateLimiter(config.get("rpm", 100), config.get("tpm", 10_000_000))
-        self.slots = threading.BoundedSemaphore(config.get("max_inflight", 32))
+        rpm = config.get("rpm", 100)
+        tpm = config.get("tpm", 10_000_000)
+        max_inflight = config.get("max_inflight", 32)
+        limiter_group = config.get("limiter_group")
+        if limiter_group:
+            key = (limiter_group, rpm, tpm, max_inflight)
+            with _SHARED_BUDGETS_LOCK:
+                budget = _SHARED_BUDGETS.setdefault(
+                    key,
+                    (RateLimiter(rpm, tpm), threading.BoundedSemaphore(max_inflight)),
+                )
+            self.limiter, self.slots = budget
+        else:
+            self.limiter = RateLimiter(rpm, tpm)
+            self.slots = threading.BoundedSemaphore(max_inflight)
         self.log_lock = threading.Lock()
         self.path = Path(os.environ["MIMO_METRICS_PATH"]) if os.environ.get("MIMO_METRICS_PATH") else None
         self.requests = 0
@@ -128,12 +148,55 @@ class MimoClient:
                     pass
         return 2**attempt + random.uniform(0, 0.5)
 
-    def complete(self, messages, trajectory_id):
+    @staticmethod
+    def _render_tool_response(message, tools):
+        content = getattr(message, "content", None)
+        tool_calls = getattr(message, "tool_calls", None) or []
+        if not tool_calls:
+            if not isinstance(content, str) or not content.strip():
+                raise MimoResponseError("empty_or_nontext_content")
+            return content, 0
+
+        if len(tool_calls) != 1:
+            raise MimoResponseError("multiple_tool_calls", retryable=True)
+
+        allowed_names = {
+            item["function"]["name"]
+            for item in tools or []
+            if isinstance(item, dict) and "function" in item
+        }
+        blocks = []
+        for call in tool_calls:
+            function = getattr(call, "function", None)
+            name = getattr(function, "name", None)
+            arguments = getattr(function, "arguments", None)
+            if not isinstance(name, str) or name not in allowed_names:
+                raise MimoResponseError("unknown_tool_call", retryable=False)
+            try:
+                arguments = json.loads(arguments) if isinstance(arguments, str) else arguments
+            except json.JSONDecodeError as exc:
+                raise MimoResponseError("malformed_tool_arguments") from exc
+            if not isinstance(arguments, dict):
+                raise MimoResponseError("malformed_tool_arguments")
+            payload = json.dumps(
+                {"name": name, "arguments": arguments},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            blocks.append(f"<tool_call>\n{payload}\n</tool_call>")
+        prefix = content.strip() + "\n" if isinstance(content, str) and content.strip() else ""
+        return prefix + "\n".join(blocks), len(blocks)
+
+    def complete(self, messages, trajectory_id, tools=None, role="user"):
+        if role not in {"user", "teacher"}:
+            raise ValueError(f"Unsupported MiMo request role: {role}")
         # UTF-8 bytes plus generous per-message framing bound the text token count.
         reservation = len(json.dumps(messages, ensure_ascii=False).encode("utf-8")) + 256 * len(messages)
+        if tools:
+            reservation += len(json.dumps(tools, ensure_ascii=False).encode("utf-8"))
         reservation += self.max_tokens
         with self.slots:
-            for attempt in range(4):
+            for attempt in range(self.max_attempts):
                 if self.fatal.is_set():
                     raise UserSimulatorAPIError("MiMo batch already aborted")
                 ticket, waited = self.limiter.acquire(reservation)
@@ -148,11 +211,20 @@ class MimoClient:
                 failure = None
                 error_type = error_reason = finish_reason = None
                 content_chars = None
+                tool_calls_count = 0
                 response_received = False
                 try:
                     request_options = {}
                     if self.response_format is not None:
                         request_options["response_format"] = self.response_format
+                    if tools:
+                        request_options.update(
+                            {
+                                "tools": tools,
+                                "tool_choice": "auto",
+                                "parallel_tool_calls": False,
+                            }
+                        )
                     response = self.sdk.chat.completions.create(
                         model=self.model,
                         messages=messages,
@@ -182,9 +254,11 @@ class MimoClient:
                         raise MimoResponseError("missing_choices")
                     choice = choices[0]
                     finish_reason = getattr(choice, "finish_reason", None)
-                    content = getattr(getattr(choice, "message", None), "content", None)
-                    content_chars = len(content) if isinstance(content, str) else None
-                    if finish_reason != "stop":
+                    message = getattr(choice, "message", None)
+                    content, tool_calls_count = self._render_tool_response(message, tools)
+                    content_chars = len(content)
+                    accepted_finish_reasons = {"stop", "tool_calls"} if tools else {"stop"}
+                    if finish_reason not in accepted_finish_reasons:
                         reason = "content_filter" if finish_reason == "content_filter" else "unexpected_finish_reason"
                         raise MimoResponseError(
                             reason,
@@ -196,8 +270,6 @@ class MimoClient:
                                 "content_filter",
                             ),
                         )
-                    if not isinstance(content, str) or not content.strip():
-                        raise MimoResponseError("empty_or_nontext_content")
                 except Exception as exc:  # noqa: BLE001 - sanitize SDK errors and abort the entire rollout batch
                     status = getattr(exc, "status_code", status)
                     retryable = status == 429 or (isinstance(status, int) and status >= 500)
@@ -209,7 +281,7 @@ class MimoClient:
                         retryable = exc.retryable
                     error_type = type(exc).__name__
                     error_reason = exc.reason if isinstance(exc, MimoResponseError) else error_type
-                    retry = retryable and attempt < 3
+                    retry = retryable and attempt < self.max_attempts - 1
                     # Never include raw SDK exception text, request headers, or credentials.
                     failure = (
                         f"MiMo request failed: {error_type}, reason={error_reason}, "
@@ -225,6 +297,7 @@ class MimoClient:
                     self._record(
                         {
                             "trajectory_id": trajectory_id,
+                            "role": role,
                             "attempt": attempt + 1,
                             "started_at": wall_started,
                             "finished_at": time.time(),
@@ -238,6 +311,7 @@ class MimoClient:
                             "response_received": response_received,
                             "finish_reason": finish_reason,
                             "content_chars": content_chars,
+                            "tool_calls": tool_calls_count,
                             "error_type": error_type,
                             "error_reason": error_reason,
                             "reserved_tokens": reservation,

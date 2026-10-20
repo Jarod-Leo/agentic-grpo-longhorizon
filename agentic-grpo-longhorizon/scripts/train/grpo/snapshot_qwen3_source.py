@@ -29,6 +29,8 @@ def main() -> None:
         "verl/tests/trainer/ppo/test_dynamic_sampling_on_cpu.py",
         "verl/tests/trainer/ppo/test_distillation_loss_on_cpu.py",
         "verl/tests/trainer/ppo/test_standalone_validation_on_cpu.py",
+        "verl/tests/trainer/ppo/test_local_branch_training_on_cpu.py",
+        "verl/tests/workers/actor/test_local_branch_loss_on_cpu.py",
     ]
     manifest = {}
     for source in sources:

@@ -1,0 +1,2 @@
+- name: tool_agent
+  _target_: src.envs.verified_sft_agent_loop.VerifiedSFTTauBenchAgentLoop

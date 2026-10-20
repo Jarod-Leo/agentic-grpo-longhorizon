@@ -144,8 +144,17 @@ def main() -> None:
                 "skipped_updates", 0
             ) == start
     if args.adapter:
+        assert not args.resume, "Adapter initialization cannot be combined with optimizer resume"
         for name in ("adapter_config.json", "adapter_model.safetensors"):
             assert (args.adapter / name).is_file(), f"Missing adapter file: {name}"
+    local_branch_config = OmegaConf.select(
+        method_config, "actor_rollout_ref.rollout.multi_turn.local_branch"
+    )
+    local_branch_metadata = (
+        OmegaConf.to_container(local_branch_config, resolve=True)
+        if local_branch_config is not None
+        else {"enable": False}
+    )
     pd.DataFrame(build_rows(train, "train")).to_parquet(
         args.run / "train.parquet", index=False
     )
@@ -167,29 +176,49 @@ def main() -> None:
     checkpoint_steps = [] if dynamic_sampling else scheduled_steps(args.save_freq)
     if dynamic_sampling:
         trajectory_budget = int(filter_config.get("trajectory_budget", 0))
+        target_optimizer_updates = int(
+            filter_config.get("target_optimizer_updates", 0)
+        )
         generated = int(dynamic_state["generated_trajectories"])
+        optimizer_updates = int(dynamic_state["optimizer_updates"])
         assert filter_config.get("metric") == "outcome_reward"
         assert int(filter_config.get("max_num_gen_batches", 0)) > 0
-        assert trajectory_budget > generated >= 0
-        expected_training_trajectories = trajectory_budget - generated
+        assert (trajectory_budget > 0) != (target_optimizer_updates > 0)
+        assert generated >= 0 and optimizer_updates >= 0
+        if trajectory_budget > 0:
+            assert trajectory_budget > generated
+            expected_training_trajectories = trajectory_budget - generated
+            stop_condition = "trajectory_budget"
+        else:
+            assert target_optimizer_updates > optimizer_updates
+            expected_training_trajectories = None
+            stop_condition = "target_optimizer_updates"
         dynamic_metadata = {
             **filter_config,
             "enabled": True,
             "initial_generated_trajectories": generated,
-            "initial_optimizer_updates": int(dynamic_state["optimizer_updates"]),
+            "initial_optimizer_updates": optimizer_updates,
             "initial_skipped_updates": int(dynamic_state["skipped_updates"]),
             "expected_generated_trajectories_this_run": expected_training_trajectories,
+            "target_optimizer_updates_this_run": (
+                target_optimizer_updates - optimizer_updates
+                if target_optimizer_updates > 0
+                else None
+            ),
+            "stop_condition": stop_condition,
             "schedule_policy": "frequency_plus_actual_final_step",
         }
     else:
         expected_training_trajectories = (args.steps - start) * 4 * args.samples
         dynamic_metadata = {"enabled": False}
-    expected_trajectories = (
-        len(ids) * args.samples
-        if args.mode == "eval"
-        else expected_training_trajectories
-        + len(evaluation_steps) * len(ids) * args.eval_samples
-    )
+    if args.mode == "eval":
+        expected_trajectories = len(ids) * args.samples
+    elif expected_training_trajectories is None:
+        expected_trajectories = None
+    else:
+        expected_trajectories = expected_training_trajectories + len(
+            evaluation_steps
+        ) * len(ids) * args.eval_samples
     metadata = {
         "protocol": PROTOCOL,
         "terminal_semantics": "first_environment_done_v1",
@@ -240,11 +269,19 @@ def main() -> None:
         "eval_samples_per_task": args.eval_samples,
         "resume_from": str(args.resume) if args.resume else None,
         "adapter": str(args.adapter) if args.adapter else None,
+        "initialization": (
+            "full_checkpoint_resume"
+            if args.resume
+            else "pretrained_adapter"
+            if args.adapter
+            else "base_model"
+        ),
         "base_model": os.environ["POLICY_MODEL"],
         "seed": 42,
         "split_sha256": hashlib.sha256(split_path.read_bytes()).hexdigest(),
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "dynamic_sampling": dynamic_metadata,
+        "local_branch": local_branch_metadata,
     }
     if skill_metadata is not None:
         metadata["distillation"]["skill_bank"] = skill_metadata

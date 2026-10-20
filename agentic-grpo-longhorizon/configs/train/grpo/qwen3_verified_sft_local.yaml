@@ -1,0 +1,40 @@
+# Experiment C: verified-SFT initialization plus root-action local credit.
+hydra:
+  searchpath:
+    - pkg://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - qwen3_common
+  - qwen3_performance
+  - _self_
+
+actor_rollout_ref:
+  actor:
+    loss_agg_mode: seq-mean-token-mean
+    ppo_epochs: 1
+    local_branch_loss:
+      enabled: true
+      coef: 0.25
+  rollout:
+    agent:
+      agent_loop_config_path: ${oc.env:REPO}/configs/interaction_config/tau_bench_local_branch_loop.yaml
+    multi_turn:
+      local_branch:
+        enable: true
+        validation_only: false
+        trigger: critical_prefix
+        trigger_tools:
+          - get_reservation_details
+          - search_direct_flight
+          - search_onestop_flight
+        candidates: 4
+        continuations: 2
+        emit_training_fields: true
+        output_dir: ${oc.env:RUN_DIR}/branches
+
+trainer:
+  total_epochs: 3
+  total_training_steps: 25
+  save_freq: 25
+  test_freq: -1

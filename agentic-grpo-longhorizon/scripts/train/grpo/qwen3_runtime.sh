@@ -81,8 +81,18 @@ setup_qwen3_run() {
         prepare+=(--adapter "$ADAPTER_PATH")
         QWEN3_OVERRIDES+=(actor_rollout_ref.model.lora_rank=16 "actor_rollout_ref.model.lora_adapter_path=$ADAPTER_PATH")
     fi
+    if [ -n "${INIT_ADAPTER_PATH:-}" ]; then
+        test "$MODE" = train
+        test -z "${RESUME_FROM:-}" || {
+            echo 'Choose adapter initialization or full checkpoint resume, not both' >&2
+            exit 2
+        }
+        prepare+=(--adapter "$INIT_ADAPTER_PATH")
+        prepare+=(--override "actor_rollout_ref.model.lora_adapter_path=$INIT_ADAPTER_PATH")
+        QWEN3_OVERRIDES+=("actor_rollout_ref.model.lora_adapter_path=$INIT_ADAPTER_PATH")
+    fi
     python scripts/train/grpo/prepare_qwen3_run.py "$RUN_DIR" "${prepare[@]}"
-    export EXPECTED_TRAJECTORIES=$(python -c 'import json,os; print(json.load(open(os.path.join(os.environ["RUN_DIR"],"run.json")))["expected_trajectories"])')
+    export EXPECTED_TRAJECTORIES=$(python -c 'import json,os; value=json.load(open(os.path.join(os.environ["RUN_DIR"],"run.json")))["expected_trajectories"]; print(value if value is not None else 0)')
     export TAU_REWARD_MODE=$(python -c 'import json,os; print(json.load(open(os.path.join(os.environ["RUN_DIR"],"run.json")))["reward_mode"])')
     python -c 'import torch; assert torch.cuda.device_count() == 1; print("GPU:", torch.cuda.get_device_name(0), flush=True)'
     if [ "$MODE" = eval ]; then
