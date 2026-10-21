@@ -40,7 +40,7 @@ with initialize_config_dir(config_dir=str(root / 'configs/eval/qwen3'), version_
     assert not config.data.apply_chat_template_kwargs.enable_thinking
     OmegaConf.save(config, Path(os.environ['RUN_DIR']) / 'config.yaml')
 interaction = yaml.safe_load((root / 'configs/interaction_config/tau_bench_airline_mimo_v26.yaml').read_text())
-assert interaction['interaction'][0]['config']['user_model'] == 'mimo-v2.6-pro'
+assert interaction['interaction'][0]['config']['user_model'] == 'mimo-v2.6-flash'
 print('LOCAL_BRANCH_CONFIG_OK')
 historical_run = os.environ.get('BRANCH_REGRESSION_RUN')
 if historical_run:

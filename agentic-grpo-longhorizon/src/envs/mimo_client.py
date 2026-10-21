@@ -78,7 +78,7 @@ class RateLimiter:
 
 class MimoClient:
     def __init__(self, config, sdk=None):
-        self.model = config.get("user_model", "mimo-v2.5")
+        self.model = config.get("user_model", "mimo-v2.6-flash")
         self.max_tokens = int(config.get("max_completion_tokens", 1024))
         self.max_attempts = int(os.environ.get("MIMO_MAX_ATTEMPTS", "4"))
         if self.max_attempts < 1:
@@ -324,7 +324,7 @@ class MimoClient:
 
 
 def estimated_cost_usd(usage):
-    """Published MiMo-v2.5 prices at 2026-09-19; estimate, not a billing receipt."""
+    """Published MiMo-v2.6-Flash prices at 2026-10-21; estimate, not a billing receipt."""
     if usage is None:
         return None
     cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0

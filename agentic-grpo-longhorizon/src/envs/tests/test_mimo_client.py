@@ -16,7 +16,7 @@ def reply(content="Please cancel it.", finish="stop", usage=True):
     return ChatCompletion(
         id="test-response",
         created=1,
-        model="mimo-v2.5",
+        model="mimo-v2.6-flash",
         object="chat.completion",
         choices=[
             {
@@ -53,6 +53,7 @@ def client_for(tmp_path, monkeypatch, responses, config=None):
 def test_response_format_is_optional_and_passed_to_sdk_when_configured(tmp_path, monkeypatch, config):
     client, calls, _path = client_for(tmp_path, monkeypatch, [reply(content='{"answer": "ok"}')], config)
     assert client.complete([{"role": "user", "content": "Return JSON."}], "extraction")[0] == '{"answer": "ok"}'
+    assert calls[0]["model"] == "mimo-v2.6-flash"
     if config.get("response_format") is None:
         assert "response_format" not in calls[0]
     else:

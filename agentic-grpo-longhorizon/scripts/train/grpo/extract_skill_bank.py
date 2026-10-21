@@ -47,7 +47,7 @@ def main() -> None:
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, local_files_only=True)
         client = MimoClient(
             {
-                "user_model": "mimo-v2.5",
+                "user_model": "mimo-v2.6-flash",
                 "rpm": 100,
                 "tpm": 10_000_000,
                 "max_inflight": 4,

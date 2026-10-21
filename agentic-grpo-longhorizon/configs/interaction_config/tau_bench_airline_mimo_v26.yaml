@@ -8,7 +8,7 @@ interaction:
       reward_mode: ${oc.env:TAU_REWARD_MODE,binary}
       user_backend: mimo
       user_strategy: llm
-      user_model: mimo-v2.6-pro
+      user_model: mimo-v2.6-flash
       user_base_url: https://api.xiaomimimo.com/v1
       rpm: 100
       tpm: 10000000

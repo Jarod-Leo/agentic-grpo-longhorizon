@@ -60,7 +60,7 @@ record = {
     'continuations': int(os.environ['BRANCH_CONTINUATIONS']),
     'anchor_turns': json.loads(os.environ['BRANCH_ANCHOR_TURNS']),
     'adapter_path': os.environ['ADAPTER_PATH'],
-    'simulator_model': 'mimo-v2.6-pro',
+    'simulator_model': 'mimo-v2.6-flash',
     'optimizer_updates': 0,
     'terminal_semantics': 'first_environment_done_v1',
 }

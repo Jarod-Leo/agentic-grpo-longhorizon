@@ -83,7 +83,7 @@ class WordTokenizer:
 
 
 class FakeMimo:
-    model = "mock-mimo-v2.5"
+    model = "mock-mimo-v2.6-flash"
 
     def __init__(self, fail_on=None, fail_on_trajectory=None):
         self.calls = []

@@ -51,7 +51,7 @@ assert config.actor_rollout_ref.rollout.multi_turn.max_tool_response_length == 6
 assert config.actor_rollout_ref.rollout.multi_turn.tool_response_truncate_side == "middle"
 assert Path(config.actor_rollout_ref.rollout.multi_turn.interaction_config_path) == interaction_path
 interaction = yaml.safe_load(interaction_path.read_text())
-assert interaction["interaction"][0]["config"]["user_model"] == "mimo-v2.6-pro"
+assert interaction["interaction"][0]["config"]["user_model"] == "mimo-v2.6-flash"
 metadata = json.loads((Path(os.environ["PREPARED_RUN"]) / "run.json").read_text())
 assert metadata["max_tool_response_length"] == 65536
 assert metadata["tool_response_truncate_side"] == "middle"

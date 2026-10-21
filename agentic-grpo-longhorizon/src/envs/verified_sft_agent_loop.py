@@ -135,7 +135,7 @@ class VerifiedSFTTauBenchAgentLoop(TauBenchAgentLoop):
             raise ValueError(f"Unsupported verified SFT collection mode: {cls.collection_mode}")
         cls.teacher_max_tokens = int(collection.get("teacher_max_tokens", 1024))
         teacher_config = {
-            "user_model": collection.get("teacher_model", "mimo-v2.6-pro"),
+            "user_model": collection.get("teacher_model", "mimo-v2.6-flash"),
             "user_base_url": collection.get("teacher_base_url", "https://api.xiaomimimo.com/v1"),
             "max_completion_tokens": cls.teacher_max_tokens,
             "rpm": int(collection.get("rpm", 100)),
