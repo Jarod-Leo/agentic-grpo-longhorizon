@@ -29,6 +29,36 @@ def reply(content="Please cancel it.", finish="stop", usage=True):
     )
 
 
+def tool_reply(*calls):
+    from openai.types.chat import ChatCompletion
+
+    return ChatCompletion(
+        id="test-tool-response",
+        created=1,
+        model="mimo-v2.6-flash",
+        object="chat.completion",
+        choices=[
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": f"call_{index}",
+                            "type": "function",
+                            "function": {"name": name, "arguments": json.dumps(arguments)},
+                        }
+                        for index, (name, arguments) in enumerate(calls)
+                    ],
+                },
+            }
+        ],
+        usage={"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+    )
+
+
 def client_for(tmp_path, monkeypatch, responses, config=None):
     calls = []
 
@@ -106,6 +136,22 @@ def test_persistent_invalid_response_aborts_after_four_attempts(tmp_path, monkey
     assert not any(r["success"] for r in rows)
 
 
+def test_configured_attempts_recover_transient_server_errors(tmp_path, monkeypatch):
+    monkeypatch.setenv("MIMO_MAX_ATTEMPTS", "8")
+    errors = []
+    for _ in range(7):
+        error = RuntimeError("temporary provider failure")
+        error.status_code = 503
+        errors.append(error)
+    client, calls, path = client_for(tmp_path, monkeypatch, [*errors, reply()])
+
+    assert client.complete([], "trajectory")[0] == "Please cancel it."
+    assert len(calls) == 8 and not client.fatal.is_set()
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [row["retry"] for row in rows] == [True] * 7 + [False]
+    assert rows[-1]["success"]
+
+
 def test_content_filter_retries_same_messages_and_appends_only_valid_text(tmp_path, monkeypatch):
     client, calls, path = client_for(
         tmp_path,
@@ -132,6 +178,49 @@ def test_content_filter_retries_same_messages_and_appends_only_valid_text(tmp_pa
     assert rows[0]["finish_reason"] == rows[0]["error_reason"] == "content_filter"
     assert rows[1]["success"] and rows[1]["finish_reason"] == "stop"
     assert "filtered partial text" not in path.read_text()
+
+
+def test_teacher_retries_multiple_tool_calls_with_private_single_action_feedback(tmp_path, monkeypatch):
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": f"Run {name}",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        }
+        for name in ("lookup_order", "lookup_policy")
+    ]
+    client, calls, path = client_for(
+        tmp_path,
+        monkeypatch,
+        [
+            tool_reply(("lookup_order", {}), ("lookup_policy", {})),
+            tool_reply(("lookup_order", {})),
+        ],
+    )
+    initial_messages = [{"role": "user", "content": "Check the order and policy."}]
+    messages = deepcopy(initial_messages)
+
+    content, _usage = client.complete(messages, "teacher-trajectory", tools=tools, role="teacher")
+
+    assert json.loads(content.splitlines()[1]) == {"name": "lookup_order", "arguments": {}}
+    assert messages == initial_messages
+    assert calls[0]["parallel_tool_calls"] is False and calls[0]["tool_choice"] == "auto"
+    assert calls[0]["messages"][0]["role"] == "system"
+    assert "at most one tool call" in calls[0]["messages"][0]["content"]
+    assert calls[0]["messages"][1:] == initial_messages
+    assert calls[1]["messages"][:-1] == calls[0]["messages"]
+    feedback = calls[1]["messages"][-1]
+    assert feedback["role"] == "system"
+    assert "multiple tool calls" in feedback["content"]
+    assert "None of the proposed tool calls ran" in feedback["content"]
+    assert all("tool_calls" not in message and message["role"] != "tool" for message in calls[1]["messages"])
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert rows[0]["tool_calls"] == 2 and rows[0]["error_reason"] == "multiple_tool_calls"
+    assert rows[0]["retry"] and not rows[0]["success"]
+    assert rows[1]["tool_calls"] == 1 and rows[1]["success"]
 
 
 def test_persistent_content_filter_aborts_after_four_attempts(tmp_path, monkeypatch):

@@ -72,4 +72,10 @@ changed=(
 )
 python -m ruff check "${changed[@]}"
 python -m ruff format --check "${changed[@]}"
+if [ "${CHECK_TEACHER_API:-0}" = 1 ]; then
+    cd "$REPO"
+    export RUN_DIR="$RUN_ROOT/teacher-api"
+    mkdir -p "$RUN_DIR"
+    python scripts/train/sft/check_verified_sft.py --teacher-api
+fi
 echo VERIFIED_COMPARISON_CPU_CHECKS_PASSED

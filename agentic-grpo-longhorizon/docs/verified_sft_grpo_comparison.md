@@ -107,3 +107,30 @@ GPU 源码固定为 `experiments/verified_sft_grpo/source-minimal-v3`。CPU 验�
 2026-10-20 检查时账户为 msc，默认 QoS msc，可使用最多 2 张 Pro6000；无活跃作业。SSD 使用 76.7/150 GB，HDD 使用 188.2/400 GB。本轮优先单卡串行运行，避免教师与用户模拟器并发作业争用 100 RPM 配额，不使用可抢占 QoS。
 
 官方 AI agent 摘要的 GitHub 页面和 raw 地址均返回 404，沿用仓库集群手册并核对实时 Slurm 限额。源码未提交作业前可编辑，历史快照保持不变。
+
+
+## 2026-10-21 Flash 恢复实验
+
+旧链路的实际结果：215803 已完成，修复环境后的普通 GRPO step200 在旧 Pro 用户模拟器下 train 为 104/320（32.5%），test 为 8/80（10%）。215829 在教师采集阶段因返回多个工具调用而失败，尚未完成轨迹、SFT 或 B 训练；215830–215832 随依赖失败自动取消。失败时教师模型为 Pro，不能将该失败归因于 Flash。
+
+217264 的 Flash 连通性验证通过，但只检查普通文本响应。本轮保留严格单工具校验，为教师 API 请求副本增加单动作约束和有上限的纠错反馈，并在拒绝前记录实际调用数量。教师私有格式指导不写入学生历史；被拒绝的调用不执行，不产生虚假工具结果，也不作为监督目标。另修复小样本采集元数据：6 个任务的采集应按这 6 个任务验收，不能沿用完整 40 个训练任务。
+
+新源码冻结于 `experiments/verified_sft_grpo/source-flash-minimal-v1`，输出位于 `experiments/verified_sft_grpo/minimal-flash-seed42-v1`。实际作业及检查状态以 `submission.json` 和 Slurm 记录为准。CPU 回归增加采集子集测试，并增加三种真实 Flash native tools 探针（单工具、独立工具需求、依赖工具需求），每轮只接受一个工具调用。
+
+执行顺序：CPU/真实 API 预检 → 采集/SFT/一步 GRPO smoke → A 的 Flash train/test 补评 → 正式采集与 SFT/独立评测 → B 25 步与评测 → C smoke/局部信号检查/条件执行 25 步与评测。所有 GPU 阶段串行，前序失败则取消后续依赖，不自动扩展到 200 步。A 使用既有 Pro 训练的 step200 adapter，仅在 Flash 下重新评测，仍属于不同训练预算和训练模拟器的参考结果；B/C 共享 Flash 协议、SFT adapter、优化器设置及 25 步预算。
+
+本轮由 explorer 调查失败日志与验证覆盖，fallback worker 修复教师 API 和探针，主线程修复子集元数据、集成检查并提交作业。2026-10-21 资源核对：正常 msc QoS，最多 5 个在队列中的作业、2 个运行作业；SSD 77.5/150 GB，HDD 188.2/400 GB。继续使用单卡 Pro6000 串行实验。
+
+
+本轮预检 217534 已 COMPLETED（exit 0）：120 项基线回归 + 38 项新增/相关测试通过，配置、真实 Qwen3 tokenizer 和 7 个框架文件 Ruff 通过。三个真实 Flash 工具场景均一次请求通过。
+
+| 作业 | 阶段 | 2026-10-21 提交时状态 |
+| --- | --- | --- |
+| 217534 | CPU + Flash tools 预检 | COMPLETED |
+| 217536 | 采集/SFT/B 一步 smoke | PENDING |
+| 217537 | A step200 Flash train/test 补评 | 等待 smoke 成功 |
+| 217538 | 正式采集、SFT 及独立评测 | 等待 A 补评成功 |
+| 217539 | B 25 步及独立评测 | 等待 SFT 成功 |
+| 217541 | C smoke、信号关卡及条件训练/评测 | 等待 B 成功 |
+
+提交记录不表示 GPU 实验已完成；尚无本轮 B/C 准确率或提升结论。

@@ -39,6 +39,7 @@ def main() -> None:
     metadata_path = args.run / "run.json"
     metadata = json.loads(metadata_path.read_text())
     metadata["eval_split"] = "train"
+    metadata["train_task_ids"] = task_ids
     metadata["test_task_ids"] = []
     metadata["collection_task_ids"] = task_ids
     metadata["samples_per_task"] = args.samples

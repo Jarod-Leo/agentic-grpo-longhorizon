@@ -8,6 +8,7 @@ import random
 import threading
 import time
 from collections import deque
+from copy import deepcopy
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -15,6 +16,16 @@ from pathlib import Path
 
 _SHARED_BUDGETS = {}
 _SHARED_BUDGETS_LOCK = threading.Lock()
+_TEACHER_TOOL_INSTRUCTION = (
+    "Tool-use constraint for this turn: return at most one tool call. If a tool is needed, call exactly one "
+    "tool, then stop and wait for its real result before deciding the next action. Never emit multiple tool calls "
+    "in one response."
+)
+_MULTIPLE_TOOL_RETRY_INSTRUCTION = (
+    "The previous response was rejected because it contained multiple tool calls. Retry the same turn with at "
+    "most one tool call. None of the proposed tool calls ran, so do not assume any result; stop after one call and "
+    "wait for its real result."
+)
 
 
 class UserSimulatorAPIError(RuntimeError):
@@ -190,15 +201,23 @@ class MimoClient:
     def complete(self, messages, trajectory_id, tools=None, role="user"):
         if role not in {"user", "teacher"}:
             raise ValueError(f"Unsupported MiMo request role: {role}")
-        # UTF-8 bytes plus generous per-message framing bound the text token count.
-        reservation = len(json.dumps(messages, ensure_ascii=False).encode("utf-8")) + 256 * len(messages)
-        if tools:
-            reservation += len(json.dumps(tools, ensure_ascii=False).encode("utf-8"))
-        reservation += self.max_tokens
+        request_messages = messages
+        if role == "teacher" and tools:
+            request_messages = [
+                {"role": "system", "content": _TEACHER_TOOL_INSTRUCTION},
+                *deepcopy(messages),
+            ]
+        multiple_tool_feedback_added = False
         with self.slots:
             for attempt in range(self.max_attempts):
                 if self.fatal.is_set():
                     raise UserSimulatorAPIError("MiMo batch already aborted")
+                # UTF-8 bytes plus generous per-message framing bound the text token count.
+                reservation = len(json.dumps(request_messages, ensure_ascii=False).encode("utf-8"))
+                reservation += 256 * len(request_messages)
+                if tools:
+                    reservation += len(json.dumps(tools, ensure_ascii=False).encode("utf-8"))
+                reservation += self.max_tokens
                 ticket, waited = self.limiter.acquire(reservation)
                 if self.fatal.is_set():
                     self.limiter.finish(ticket, 0)
@@ -227,7 +246,7 @@ class MimoClient:
                         )
                     response = self.sdk.chat.completions.create(
                         model=self.model,
-                        messages=messages,
+                        messages=request_messages,
                         temperature=0.7,
                         top_p=0.8,
                         max_completion_tokens=self.max_tokens,
@@ -255,6 +274,7 @@ class MimoClient:
                     choice = choices[0]
                     finish_reason = getattr(choice, "finish_reason", None)
                     message = getattr(choice, "message", None)
+                    tool_calls_count = len(getattr(message, "tool_calls", None) or [])
                     content, tool_calls_count = self._render_tool_response(message, tools)
                     content_chars = len(content)
                     accepted_finish_reasons = {"stop", "tool_calls"} if tools else {"stop"}
@@ -287,6 +307,18 @@ class MimoClient:
                         f"MiMo request failed: {error_type}, reason={error_reason}, "
                         f"status={status}, attempt={attempt + 1}"
                     )
+                    if (
+                        error_reason == "multiple_tool_calls"
+                        and retry
+                        and role == "teacher"
+                        and tools
+                        and not multiple_tool_feedback_added
+                    ):
+                        request_messages = [
+                            *request_messages,
+                            {"role": "system", "content": _MULTIPLE_TOOL_RETRY_INSTRUCTION},
+                        ]
+                        multiple_tool_feedback_added = True
                     if retry:
                         self.limiter.backoff(self._retry_after(exc, attempt))
                     else:

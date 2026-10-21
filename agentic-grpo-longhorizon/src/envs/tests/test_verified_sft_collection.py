@@ -1,6 +1,9 @@
 """CPU checks for teacher tool history and Qwen response boundaries."""
 
 import json
+import runpy
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -55,3 +58,16 @@ def test_teacher_response_uses_template_suffix_including_assistant_end_token():
         {"enable_thinking": False},
     )
     assert tokens == [20, 151645]
+
+
+def test_collection_subset_updates_summary_task_expectations(tmp_path, monkeypatch):
+    metadata = {"train_task_ids": list(range(40)), "test_task_ids": [48, 49]}
+    (tmp_path / "run.json").write_text(json.dumps(metadata))
+    script = Path(__file__).resolve().parents[3] / "scripts/train/sft/prepare_verified_collection.py"
+    monkeypatch.setattr(sys, "argv", [str(script), str(tmp_path), "--mode", "teacher",
+                                     "--task-ids", "0,1,4,6,13,45", "--samples", "2"])
+    runpy.run_path(str(script), run_name="__main__")
+    actual = json.loads((tmp_path / "run.json").read_text())
+    assert actual["train_task_ids"] == [0, 1, 4, 6, 13, 45]
+    assert actual["test_task_ids"] == []
+    assert actual["expected_trajectories"] == 12

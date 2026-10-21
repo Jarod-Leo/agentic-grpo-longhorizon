@@ -12,6 +12,101 @@ import pandas as pd
 from safetensors import safe_open
 from transformers import AutoTokenizer
 
+from src.envs.mimo_client import MimoClient
+
+
+_TEACHER_API_SCENARIOS = [
+    {
+        "name": "single_tool",
+        "prompt": "Use get_order once to look up order ORDER-100.",
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_order",
+                    "description": "Look up one order.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"order_id": {"type": "string"}},
+                        "required": ["order_id"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ],
+    },
+    {
+        "name": "independent_tools",
+        "prompt": "Look up order ORDER-200 and the electronics refund policy using the provided tools.",
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_order",
+                    "description": "Look up one order.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"order_id": {"type": "string"}},
+                        "required": ["order_id"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_refund_policy",
+                    "description": "Look up the refund policy for one product category.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"category": {"type": "string"}},
+                        "required": ["category"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        ],
+    },
+    {
+        "name": "dependent_tools",
+        "prompt": (
+            "Find external customer CUST-300, then update that customer's address to 3 Research Drive using the "
+            "provided tools."
+        ),
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "find_customer",
+                    "description": "Resolve an external customer ID to an internal record ID.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"external_customer_id": {"type": "string"}},
+                        "required": ["external_customer_id"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "update_customer_address",
+                    "description": "Update an address using the internal record ID returned by find_customer.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "internal_record_id": {"type": "string"},
+                            "address": {"type": "string"},
+                        },
+                        "required": ["internal_record_id", "address"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        ],
+    },
+]
+
 
 def check_data(path: Path, model: str, min_samples: int) -> None:
     frame = pd.read_parquet(path)
@@ -53,12 +148,59 @@ def check_adapter(path: Path) -> None:
     print(f"VERIFIED_SFT_ADAPTER_OK tensors={len(keys)} path={path}")
 
 
+def check_teacher_api(model: str, base_url: str) -> None:
+    client = MimoClient(
+        {
+            "user_model": model,
+            "user_base_url": base_url,
+            "max_completion_tokens": 256,
+            "rpm": 100,
+            "tpm": 1_000_000,
+            "max_inflight": 1,
+        }
+    )
+    records: list[dict] = []
+    record = client._record
+
+    def capture_record(row: dict) -> None:
+        records.append(row.copy())
+        record(row)
+
+    client._record = capture_record
+    for scenario in _TEACHER_API_SCENARIOS:
+        rows_before = len(records)
+        content, _usage = client.complete(
+            [{"role": "user", "content": scenario["prompt"]}],
+            f"teacher-api-preflight:{scenario['name']}",
+            tools=scenario["tools"],
+            role="teacher",
+        )
+        scenario_rows = records[rows_before:]
+        if not scenario_rows or not scenario_rows[-1]["success"] or scenario_rows[-1]["tool_calls"] != 1:
+            raise ValueError(f"Teacher API scenario did not return exactly one native tool call: {scenario['name']}")
+        blocks = re.findall(r"<tool_call>\s*(.*?)\s*</tool_call>", content, re.DOTALL)
+        if len(blocks) != 1:
+            raise ValueError(f"Teacher API scenario returned an invalid rendered tool call: {scenario['name']}")
+        payload = json.loads(blocks[0])
+        allowed_names = {tool["function"]["name"] for tool in scenario["tools"]}
+        if payload.get("name") not in allowed_names or not isinstance(payload.get("arguments"), dict):
+            raise ValueError(f"Teacher API scenario returned an invalid tool payload: {scenario['name']}")
+        print(
+            f"VERIFIED_SFT_TEACHER_API_SCENARIO_OK name={scenario['name']} tool={payload['name']} "
+            f"attempts={len(scenario_rows)}"
+        )
+    print(f"VERIFIED_SFT_TEACHER_API_OK scenarios={len(_TEACHER_API_SCENARIOS)} model={model}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path)
     parser.add_argument("--model")
     parser.add_argument("--min-samples", type=int, default=4)
     parser.add_argument("--adapter", type=Path)
+    parser.add_argument("--teacher-api", action="store_true")
+    parser.add_argument("--teacher-model", default="mimo-v2.6-flash")
+    parser.add_argument("--teacher-base-url", default="https://api.xiaomimimo.com/v1")
     args = parser.parse_args()
     if args.data:
         if not args.model:
@@ -66,8 +208,10 @@ def main() -> None:
         check_data(args.data, args.model, args.min_samples)
     if args.adapter:
         check_adapter(args.adapter)
-    if not args.data and not args.adapter:
-        parser.error("Provide --data and/or --adapter")
+    if args.teacher_api:
+        check_teacher_api(args.teacher_model, args.teacher_base_url)
+    if not args.data and not args.adapter and not args.teacher_api:
+        parser.error("Provide --data, --adapter and/or --teacher-api")
 
 
 if __name__ == "__main__":
