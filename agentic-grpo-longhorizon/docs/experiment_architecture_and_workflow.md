@@ -4,7 +4,7 @@
 >
 > 配套阅读：[τ-bench 数据与评测说明](tau_bench_dataset_and_evaluation.md)。本文件解释实验系统与方法，配套文件解释任务、成功判定和指标。
 
-> **2026-10-21 API配置更新**：后续用户模拟器、MiMo技能提取及Verified SFT外部教师统一使用 `mimo-v2.6-flash`，API地址为 `https://api.xiaomimimo.com/v1`。两份现有MiMo交互配置均已更新，旧预检从配置读取模型名。限流继续使用100 RPM、1000万TPM，关闭thinking。此前实验和已冻结源码保留各自实际模型版本，因此历史表格中的v2.5/v2.6 Pro并非当前默认值。切换模拟器后的新结果需要标明Flash协议，不能直接作为同模拟器下的训练改进。官方依据：[模型列表与下架说明](https://mimo.mi.com/docs/quick-start/model)、[Flash接口与价格](https://mimo.mi.com/models/en-US/mimo-v2.6-flash)。CPU回归及一次真实API验证作业：217244。
+> **2026-10-21 API配置更新**：后续用户模拟器、MiMo技能提取及Verified SFT外部教师统一使用 `mimo-v2.6-flash`，API地址为 `https://api.xiaomimimo.com/v1`。两份现有MiMo交互配置均已更新，旧预检从配置读取模型名。限流继续使用100 RPM、1000万TPM，关闭thinking。此前实验和已冻结源码保留各自实际模型版本，因此历史表格中的v2.5/v2.6 Pro并非当前默认值。切换模拟器后的新结果需要标明Flash协议，不能直接作为同模拟器下的训练改进。官方依据：[模型列表与下架说明](https://mimo.mi.com/docs/quick-start/model)、[Flash接口与价格](https://mimo.mi.com/models/en-US/mimo-v2.6-flash)。CPU回归及一次真实API验证作业：217264（替代未启动的217244）。
 
 ## 目录
 
