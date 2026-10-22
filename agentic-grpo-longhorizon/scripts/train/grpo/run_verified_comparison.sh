@@ -2,7 +2,7 @@
 # Staged A/B/C comparison, using the shared collection, veRL and evaluation entries.
 set -eo pipefail
 
-STAGE=${1:?Usage: run_verified_comparison.sh smoke|sft|b|c}
+STAGE=${1:?Usage: run_verified_comparison.sh smoke|collection_smoke|sft|b|c}
 cd "$(dirname "$0")/../../.."
 export REPO=$(pwd)
 : "${SLURM_JOB_ID:?Run inside Slurm}" "${COMPARISON_ROOT:?Set experiment output root}"
@@ -25,12 +25,19 @@ run_child() {
 
 collect_and_sft() {
     local scope=$1 output=$2
-    run_child "$output/teacher" COLLECTION_SCOPE="$scope" \
-        bash scripts/train/sft/run_verified_collection.sh teacher
+    local teacher_data="$output/teacher/collect-teacher-$scope/verified_teacher.parquet"
+    if [ "$scope" = formal ] && [ -n "${VERIFIED_TEACHER_DATA:-}" ]; then
+        teacher_data=$VERIFIED_TEACHER_DATA
+        test -f "$teacher_data"
+        echo "REUSING_VERIFIED_TEACHER_DATA path=$teacher_data"
+    else
+        run_child "$output/teacher" COLLECTION_SCOPE="$scope" \
+            bash scripts/train/sft/run_verified_collection.sh teacher
+    fi
     run_child "$output/correction" COLLECTION_SCOPE="$scope" \
         bash scripts/train/sft/run_verified_collection.sh correction
     run_child "$output" \
-        SFT_FILES="[$output/teacher/collect-teacher-$scope/verified_teacher.parquet,$output/correction/collect-correction-$scope/verified_correction.parquet]" \
+        SFT_FILES="[$teacher_data,$output/correction/collect-correction-$scope/verified_correction.parquet]" \
         bash scripts/train/sft/run_verified_sft.sh "$scope"
 }
 
@@ -50,6 +57,11 @@ evaluate() {
 }
 
 case "$STAGE" in
+    collection_smoke)
+        # Revalidate the changed collection path; prior SFT/GRPO smoke remains valid.
+        run_child "$COMPARISON_ROOT/smoke/correction" COLLECTION_SCOPE=smoke \
+            bash scripts/train/sft/run_verified_collection.sh correction
+        ;;
     smoke)
         collect_and_sft smoke "$COMPARISON_ROOT/smoke"
         adapter=$(cat "$COMPARISON_ROOT/smoke/sft/final_adapter.txt")
@@ -70,9 +82,16 @@ case "$STAGE" in
     c)
         adapter=$(cat "$COMPARISON_ROOT/sft/final_adapter.txt")
         for local_stage in smoke signal train; do
-            run_child "$COMPARISON_ROOT/c" INIT_ADAPTER_PATH="$adapter" \
-                bash scripts/train/grpo/run_verified_local_credit.sh "$local_stage" \
-                "${COMMON_OVERRIDES[@]}"
+            if [ "$local_stage" = smoke ]; then
+                # The smoke adapter is not reused; keep SSD space for formal checkpoints.
+                run_child "$COMPARISON_ROOT/c" INIT_ADAPTER_PATH="$adapter" SAVE_FREQ=-1 \
+                    bash scripts/train/grpo/run_verified_local_credit.sh "$local_stage" \
+                    "${COMMON_OVERRIDES[@]}"
+            else
+                run_child "$COMPARISON_ROOT/c" INIT_ADAPTER_PATH="$adapter" \
+                    bash scripts/train/grpo/run_verified_local_credit.sh "$local_stage" \
+                    "${COMMON_OVERRIDES[@]}"
+            fi
         done
         if [ ! -f "$COMPARISON_ROOT/c/stopped.json" ]; then
             evaluate "$COMPARISON_ROOT/c/train/checkpoints/global_step_25/actor/lora_adapter" \

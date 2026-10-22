@@ -9,7 +9,7 @@ import time
 from copy import deepcopy
 from pathlib import Path
 
-from src.envs.mimo_client import MimoClient, MimoResponseError
+from src.envs.mimo_client import MimoClient, MimoResponseError, TeacherOutputTruncatedError
 from src.envs.tau_bench_agent_loop import TauBenchAgentLoop
 from verl.experimental.agent_loop.tool_agent_loop import AgentState
 from verl.workers.rollout.replica import TokenOutput
@@ -133,11 +133,13 @@ class VerifiedSFTTauBenchAgentLoop(TauBenchAgentLoop):
         cls.collection_mode = str(collection.get("mode", "teacher"))
         if cls.collection_mode not in {"teacher", "correction"}:
             raise ValueError(f"Unsupported verified SFT collection mode: {cls.collection_mode}")
-        cls.teacher_max_tokens = int(collection.get("teacher_max_tokens", 1024))
+        cls.teacher_max_tokens = int(collection.get("teacher_max_tokens", 2048))
         teacher_config = {
             "user_model": collection.get("teacher_model", "mimo-v2.6-flash"),
             "user_base_url": collection.get("teacher_base_url", "https://api.xiaomimimo.com/v1"),
             "max_completion_tokens": cls.teacher_max_tokens,
+            "teacher_retry_max_tokens": int(collection.get("teacher_retry_max_tokens", 4096)),
+            "teacher_rejection_scope": "verified_sft_collection",
             "rpm": int(collection.get("rpm", 100)),
             "tpm": int(collection.get("tpm", 10_000_000)),
             "max_inflight": int(collection.get("max_inflight", 32)),
@@ -183,14 +185,18 @@ class VerifiedSFTTauBenchAgentLoop(TauBenchAgentLoop):
 
     async def _teacher_tokens(self, data) -> list[int] | None:
         messages = openai_teacher_messages(data.messages)
-        content, usage = await self.loop.run_in_executor(
-            None,
-            self.teacher_client.complete,
-            messages,
-            data.request_id,
-            self.tool_schemas,
-            "teacher",
-        )
+        try:
+            content, usage = await self.loop.run_in_executor(
+                None,
+                self.teacher_client.complete,
+                messages,
+                data.request_id,
+                self.tool_schemas,
+                "teacher",
+            )
+        except TeacherOutputTruncatedError:
+            self.collection_failure = "teacher_output_truncated"
+            return None
         self.teacher_usage.append(usage)
         if any(match.strip() for match in _NONEMPTY_THINK_RE.findall(content)):
             self.collection_failure = "teacher_nonempty_think"
@@ -207,9 +213,6 @@ class VerifiedSFTTauBenchAgentLoop(TauBenchAgentLoop):
             ),
         )
         remaining = self.response_length - len(data.response_mask)
-        if len(token_ids) > self.teacher_max_tokens:
-            self.collection_failure = "teacher_turn_token_budget"
-            return None
         if len(token_ids) > remaining:
             self.collection_failure = "trajectory_token_budget"
             return None

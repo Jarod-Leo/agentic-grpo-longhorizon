@@ -10,6 +10,7 @@ bash scripts/train/grpo/check_qwen3.sh
 python -m pytest -q \
     src/envs/tests/test_verified_sft_collection.py \
     src/training/tests/test_verified_sft_dataset.py \
+    src/training/tests/test_build_verified_sft.py \
     src/envs/tests/test_tau_bench_terminal.py \
     src/envs/tests/test_tau_bench_snapshot.py \
     src/evaluation/tests/test_local_branching.py \
@@ -62,6 +63,7 @@ bash -n scripts/train/grpo/run_verified_comparison.sh \
 export PYTHONPATH="/projects/_ssd/jiatian001ssd/cabinagentrl/agentic-grpo-longhorizon/repo/agentic-grpo-longhorizon/experiments/grpo_dynamic_sampling/tooling:$PYTHONPATH"
 cd "$REPO/../verl"
 changed=(
+    verl/experimental/agent_loop/tool_agent_loop.py
     verl/trainer/fsdp_sft_trainer.py
     verl/trainer/ppo/ray_trainer.py
     verl/workers/actor/dp_actor.py

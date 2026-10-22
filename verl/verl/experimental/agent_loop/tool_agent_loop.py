@@ -188,7 +188,7 @@ class ToolAgentLoop(AgentLoopBase):
                 logger.warning(f"Error calculating final score for request {agent_data.request_id}: {e}")
 
         # Finalize output
-        response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
+        response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :] if agent_data.response_mask else []
         prompt_ids = agent_data.prompt_ids[: len(agent_data.prompt_ids) - len(agent_data.response_mask)]
         multi_modal_data = {"image": agent_data.image_data} if agent_data.image_data is not None else {}
         output = AgentLoopOutput(

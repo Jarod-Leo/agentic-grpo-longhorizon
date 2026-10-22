@@ -5,7 +5,7 @@ from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
-from src.envs.mimo_client import MimoClient, UserSimulatorAPIError
+from src.envs.mimo_client import MimoClient, TeacherOutputTruncatedError, UserSimulatorAPIError
 from src.envs.mimo_user_simulator import MimoUserSimulationEnv
 from src.evaluation.run_metrics import summarize_api
 
@@ -56,6 +56,35 @@ def tool_reply(*calls):
             }
         ],
         usage={"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+    )
+
+
+def truncated_tool_reply(name="lookup_order"):
+    from openai.types.chat import ChatCompletion
+
+    return ChatCompletion(
+        id="test-truncated-tool-response",
+        created=1,
+        model="mimo-v2.6-flash",
+        object="chat.completion",
+        choices=[
+            {
+                "index": 0,
+                "finish_reason": "length",
+                "message": {
+                    "role": "assistant",
+                    "content": "partial text that must be discarded",
+                    "tool_calls": [
+                        {
+                            "id": "call_partial",
+                            "type": "function",
+                            "function": {"name": name, "arguments": '{"order_id":'},
+                        }
+                    ],
+                },
+            }
+        ],
+        usage={"prompt_tokens": 10, "completion_tokens": 2048, "total_tokens": 2058},
     )
 
 
@@ -221,6 +250,70 @@ def test_teacher_retries_multiple_tool_calls_with_private_single_action_feedback
     assert rows[0]["tool_calls"] == 2 and rows[0]["error_reason"] == "multiple_tool_calls"
     assert rows[0]["retry"] and not rows[0]["success"]
     assert rows[1]["tool_calls"] == 1 and rows[1]["success"]
+
+
+def test_teacher_length_retries_once_at_larger_budget_before_rendering_partial_tool(tmp_path, monkeypatch):
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup_order",
+                "description": "Look up an order",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        }
+    ]
+    client, calls, path = client_for(
+        tmp_path,
+        monkeypatch,
+        [truncated_tool_reply(), tool_reply(("lookup_order", {}))],
+        {
+            "max_completion_tokens": 2048,
+            "teacher_retry_max_tokens": 4096,
+            "teacher_rejection_scope": "verified_sft_collection",
+        },
+    )
+    messages = [{"role": "user", "content": "Look up the order."}]
+
+    content, _usage = client.complete(messages, "teacher-length", tools=tools, role="teacher")
+
+    assert json.loads(content.splitlines()[1]) == {"name": "lookup_order", "arguments": {}}
+    assert [call["max_completion_tokens"] for call in calls] == [2048, 4096]
+    assert calls[1]["messages"] == calls[0]["messages"]
+    assert all("partial text" not in str(message) for message in calls[1]["messages"])
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [row["max_completion_tokens"] for row in rows] == [2048, 4096]
+    assert rows[0]["error_reason"] == "teacher_output_truncated" and rows[0]["retry"]
+    assert rows[0]["content_chars"] is None
+    assert all(row["teacher_rejection_scope"] == "verified_sft_collection" for row in rows)
+
+
+def test_exhausted_teacher_length_is_local_and_does_not_abort_other_requests(tmp_path, monkeypatch):
+    monkeypatch.setenv("MIMO_MAX_ATTEMPTS", "1")
+    client, calls, path = client_for(
+        tmp_path,
+        monkeypatch,
+        [reply(content="first partial", finish="length"), reply(content="second partial", finish="length"), reply()],
+        {
+            "max_completion_tokens": 2048,
+            "teacher_retry_max_tokens": 4096,
+            "teacher_rejection_scope": "verified_sft_collection",
+        },
+    )
+
+    with pytest.raises(TeacherOutputTruncatedError, match="teacher_output_truncated"):
+        client.complete([{"role": "user", "content": "Help."}], "teacher-truncated", role="teacher")
+
+    assert not client.fatal.is_set()
+    assert client.complete([{"role": "user", "content": "Continue."}], "next-request")[0] == "Please cancel it."
+    assert [call["max_completion_tokens"] for call in calls] == [2048, 4096, 2048]
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [row["retry"] for row in rows[:2]] == [True, False]
+    assert [row["error_reason"] for row in rows[:2]] == [
+        "teacher_output_truncated",
+        "teacher_output_truncated",
+    ]
+    assert rows[2]["role"] == "user" and rows[2]["success"]
 
 
 def test_persistent_content_filter_aborts_after_four_attempts(tmp_path, monkeypatch):

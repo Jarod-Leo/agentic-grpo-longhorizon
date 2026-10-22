@@ -107,6 +107,133 @@ def test_teacher_and_user_api_costs_are_separate(tmp_path):
     assert result["accepted"]
 
 
+def write_handled_teacher_truncation(tmp_path):
+    write_run(tmp_path, [0] * 8)
+    meta_path = tmp_path / "run.json"
+    meta = json.loads(meta_path.read_text())
+    meta["verified_sft_collection"] = {
+        "mode": "teacher",
+        "task_ids": [1, 4],
+        "attempts_per_task": 4,
+        "fixed_budget": True,
+    }
+    meta_path.write_text(json.dumps(meta))
+
+    rows_path = tmp_path / "eval_trajectories.jsonl"
+    rows = [json.loads(line) for line in rows_path.read_text().splitlines()]
+    rows[0].update(
+        collection_failure="teacher_output_truncated",
+        termination="teacher_output_truncated",
+    )
+    rows_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    audit_path = tmp_path / "tool_audit.jsonl"
+    audit = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    audit = [row for row in audit if row.get("trajectory_id") != "t-0"]
+    audit.append(
+        {
+            "event": "teacher_rejected",
+            "trajectory_id": "t-0",
+            "reason": "teacher_output_truncated",
+        }
+    )
+    audit_path.write_text("".join(json.dumps(row) + "\n" for row in audit))
+
+    api = [
+        {
+            "trajectory_id": "t-0",
+            "role": "teacher",
+            "attempt": 1,
+            "max_completion_tokens": 2048,
+            "teacher_rejection_scope": "verified_sft_collection",
+            "success": False,
+            "retry": True,
+            "response_received": True,
+            "finish_reason": "length",
+            "error_type": "MimoResponseError",
+            "error_reason": "teacher_output_truncated",
+        },
+        {
+            "trajectory_id": "t-0",
+            "role": "teacher",
+            "attempt": 2,
+            "max_completion_tokens": 4096,
+            "teacher_rejection_scope": "verified_sft_collection",
+            "success": False,
+            "retry": False,
+            "response_received": True,
+            "finish_reason": "length",
+            "error_type": "TeacherOutputTruncatedError",
+            "error_reason": "teacher_output_truncated",
+        },
+    ]
+    (tmp_path / "api.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in api)
+    )
+
+
+def test_verified_collection_accepts_audited_teacher_truncation(tmp_path):
+    write_handled_teacher_truncation(tmp_path)
+    result, task_rows = build_summary(tmp_path)
+    assert result["accepted"], result["checks"]
+    assert result["observed_trajectories"] == 8
+    assert result["api"]["failed_attempts"] == 2
+    assert result["api"]["handled_teacher_output_truncations"] == 1
+    assert result["api"]["teacher_output_truncation_attempts"] == 2
+    assert result["verified_sft_collection"] == {
+        "completion_accepted": True,
+        "attempts_recorded": 8,
+        "environment_result_attempts": 7,
+        "collection_failures": {"teacher_output_truncated": 1},
+        "handled_teacher_output_truncations": 1,
+        "sft_data_acceptance": "reported_by_build_verified_sft",
+    }
+    assert sum(row["n"] for row in task_rows) == 7
+
+
+@pytest.mark.parametrize(
+    "terminal_update",
+    [
+        {"role": "user"},
+        {"teacher_rejection_scope": None},
+        {
+            "error_type": "AuthenticationError",
+            "error_reason": "AuthenticationError",
+            "response_received": False,
+            "finish_reason": None,
+        },
+        {
+            "error_type": "InternalServerError",
+            "error_reason": "InternalServerError",
+            "response_received": False,
+            "finish_reason": None,
+        },
+        {"error_type": "RuntimeError", "error_reason": "RuntimeError"},
+    ],
+)
+def test_verified_collection_does_not_exempt_other_terminal_api_failures(
+    tmp_path, terminal_update
+):
+    write_handled_teacher_truncation(tmp_path)
+    path = tmp_path / "api.jsonl"
+    api = [json.loads(line) for line in path.read_text().splitlines()]
+    api[-1].update(terminal_update)
+    path.write_text("".join(json.dumps(row) + "\n" for row in api))
+    result = build_summary(tmp_path)[0]
+    assert not result["checks"]["api_no_terminal_failure"]
+    assert not result["accepted"]
+
+
+def test_verified_collection_requires_matching_teacher_rejection_audit(tmp_path):
+    write_handled_teacher_truncation(tmp_path)
+    path = tmp_path / "tool_audit.jsonl"
+    audit = [json.loads(line) for line in path.read_text().splitlines()]
+    audit[-1]["trajectory_id"] = "other-trajectory"
+    path.write_text("".join(json.dumps(row) + "\n" for row in audit))
+    result = build_summary(tmp_path)[0]
+    assert not result["checks"]["api_no_terminal_failure"]
+
+
 def test_periodic_eval_and_external_checkpoints(tmp_path):
     """Train and validation at the same step must not form one GRPO group."""
     write_run(tmp_path, [0] * 8)

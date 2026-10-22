@@ -41,6 +41,15 @@ class MimoResponseError(UserSimulatorAPIError):
         self.retryable = retryable
 
 
+class TeacherOutputTruncatedError(UserSimulatorAPIError):
+    """A teacher turn remained truncated after its one larger local retry."""
+
+    reason = "teacher_output_truncated"
+
+    def __init__(self):
+        super().__init__(self.reason)
+
+
 class RateLimiter:
     def __init__(self, rpm=100, tpm=10_000_000, window=60.0):
         self.rpm, self.tpm, self.window = rpm, tpm, window
@@ -91,6 +100,8 @@ class MimoClient:
     def __init__(self, config, sdk=None):
         self.model = config.get("user_model", "mimo-v2.6-flash")
         self.max_tokens = int(config.get("max_completion_tokens", 1024))
+        self.teacher_retry_max_tokens = int(config.get("teacher_retry_max_tokens", 4096))
+        self.teacher_rejection_scope = config.get("teacher_rejection_scope")
         self.max_attempts = int(os.environ.get("MIMO_MAX_ATTEMPTS", "4"))
         if self.max_attempts < 1:
             raise ValueError("MIMO_MAX_ATTEMPTS must be at least 1")
@@ -208,16 +219,24 @@ class MimoClient:
                 *deepcopy(messages),
             ]
         multiple_tool_feedback_added = False
+        handles_teacher_truncation = (
+            role == "teacher" and self.teacher_rejection_scope == "verified_sft_collection"
+        )
+        teacher_length_retried = False
+        request_max_tokens = self.max_tokens
+        attempt_limit = self.max_attempts
         with self.slots:
-            for attempt in range(self.max_attempts):
+            attempt = 0
+            while attempt < attempt_limit:
                 if self.fatal.is_set():
                     raise UserSimulatorAPIError("MiMo batch already aborted")
+                attempt_max_tokens = request_max_tokens
                 # UTF-8 bytes plus generous per-message framing bound the text token count.
                 reservation = len(json.dumps(request_messages, ensure_ascii=False).encode("utf-8"))
                 reservation += 256 * len(request_messages)
                 if tools:
                     reservation += len(json.dumps(tools, ensure_ascii=False).encode("utf-8"))
-                reservation += self.max_tokens
+                reservation += attempt_max_tokens
                 ticket, waited = self.limiter.acquire(reservation)
                 if self.fatal.is_set():
                     self.limiter.finish(ticket, 0)
@@ -228,6 +247,7 @@ class MimoClient:
                 status = None
                 retry = False
                 failure = None
+                terminal_exception = None
                 error_type = error_reason = finish_reason = None
                 content_chars = None
                 tool_calls_count = 0
@@ -249,7 +269,7 @@ class MimoClient:
                         messages=request_messages,
                         temperature=0.7,
                         top_p=0.8,
-                        max_completion_tokens=self.max_tokens,
+                        max_completion_tokens=attempt_max_tokens,
                         stream=False,
                         extra_body={"thinking": {"type": "disabled"}},
                         **request_options,
@@ -275,6 +295,14 @@ class MimoClient:
                     finish_reason = getattr(choice, "finish_reason", None)
                     message = getattr(choice, "message", None)
                     tool_calls_count = len(getattr(message, "tool_calls", None) or [])
+                    if handles_teacher_truncation and finish_reason == "length":
+                        if teacher_length_retried:
+                            raise TeacherOutputTruncatedError()
+                        teacher_length_retried = True
+                        request_max_tokens = self.teacher_retry_max_tokens
+                        # The single larger retry is independent of the transport retry budget.
+                        attempt_limit = max(attempt_limit, attempt + 2)
+                        raise MimoResponseError("teacher_output_truncated")
                     content, tool_calls_count = self._render_tool_response(message, tools)
                     content_chars = len(content)
                     accepted_finish_reasons = {"stop", "tool_calls"} if tools else {"stop"}
@@ -290,7 +318,7 @@ class MimoClient:
                                 "content_filter",
                             ),
                         )
-                except Exception as exc:  # noqa: BLE001 - sanitize SDK errors and abort the entire rollout batch
+                except Exception as exc:  # noqa: BLE001 - sanitize SDK errors; most abort the rollout batch
                     status = getattr(exc, "status_code", status)
                     retryable = status == 429 or (isinstance(status, int) and status >= 500)
                     retryable |= type(exc).__name__ in {
@@ -300,8 +328,15 @@ class MimoClient:
                     if isinstance(exc, MimoResponseError):
                         retryable = exc.retryable
                     error_type = type(exc).__name__
-                    error_reason = exc.reason if isinstance(exc, MimoResponseError) else error_type
-                    retry = retryable and attempt < self.max_attempts - 1
+                    error_reason = (
+                        exc.reason
+                        if isinstance(exc, (MimoResponseError, TeacherOutputTruncatedError))
+                        else error_type
+                    )
+                    local_rejection = isinstance(exc, TeacherOutputTruncatedError)
+                    if local_rejection:
+                        terminal_exception = exc
+                    retry = retryable and attempt < attempt_limit - 1
                     # Never include raw SDK exception text, request headers, or credentials.
                     failure = (
                         f"MiMo request failed: {error_type}, reason={error_reason}, "
@@ -321,7 +356,7 @@ class MimoClient:
                         multiple_tool_feedback_added = True
                     if retry:
                         self.limiter.backoff(self._retry_after(exc, attempt))
-                    else:
+                    elif not local_rejection:
                         self.fatal.set()
                 finally:
                     actual = usage.get("total_tokens") if usage else None
@@ -331,6 +366,8 @@ class MimoClient:
                             "trajectory_id": trajectory_id,
                             "role": role,
                             "attempt": attempt + 1,
+                            "max_completion_tokens": attempt_max_tokens,
+                            "teacher_rejection_scope": self.teacher_rejection_scope,
                             "started_at": wall_started,
                             "finished_at": time.time(),
                             "latency_s": time.monotonic() - started,
@@ -352,7 +389,10 @@ class MimoClient:
                 if failure is None:
                     return content, usage
                 if not retry:
+                    if terminal_exception is not None:
+                        raise terminal_exception from None
                     raise UserSimulatorAPIError(failure) from None
+                attempt += 1
 
 
 def estimated_cost_usd(usage):

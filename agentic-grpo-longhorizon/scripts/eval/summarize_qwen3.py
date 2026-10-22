@@ -37,6 +37,47 @@ def finite_number(value) -> bool:
     )
 
 
+def handled_teacher_truncation_ids(
+    meta: dict, rows: list[dict], audit: list[dict], api: list[dict]
+) -> set[str]:
+    collection = meta.get("verified_sft_collection")
+    if (
+        not isinstance(collection, dict)
+        or collection.get("fixed_budget") is not True
+        or collection.get("mode") not in {"teacher", "correction"}
+    ):
+        return set()
+    rejected_ids = {
+        row.get("trajectory_id")
+        for row in audit
+        if row.get("event") == "teacher_rejected"
+        and row.get("reason") == "teacher_output_truncated"
+    }
+    trajectory_ids = {
+        row.get("trajectory_id")
+        for row in rows
+        if row.get("collection_failure") == "teacher_output_truncated"
+        and row.get("termination") == "teacher_output_truncated"
+    }
+    terminal_api_ids = {
+        row.get("trajectory_id")
+        for row in api
+        if row.get("success") is False
+        and row.get("retry") is False
+        and row.get("role") == "teacher"
+        and row.get("teacher_rejection_scope") == "verified_sft_collection"
+        and row.get("error_type") == "TeacherOutputTruncatedError"
+        and row.get("error_reason") == "teacher_output_truncated"
+        and row.get("response_received") is True
+        and row.get("finish_reason") == "length"
+    }
+    return {
+        trajectory_id
+        for trajectory_id in terminal_api_ids & trajectory_ids & rejected_ids
+        if isinstance(trajectory_id, str) and trajectory_id
+    }
+
+
 def build_summary(run: Path) -> tuple[dict, list[dict]]:
     errors = []
     meta, err = read_json(run / "run.json", {})
@@ -67,7 +108,41 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
     validation_rows = (
         [row for row in rows if row.get("validate", False)] if mode == "train" else []
     )
-    task_rows = per_task_results(training_rows, task_splits)
+    collection_config = meta.get("verified_sft_collection")
+    is_verified_collection = (
+        isinstance(collection_config, dict)
+        and collection_config.get("fixed_budget") is True
+        and collection_config.get("mode") in {"teacher", "correction"}
+    )
+    collection_failures = Counter(
+        row.get("collection_failure")
+        for row in rows
+        if is_verified_collection and row.get("collection_failure")
+    )
+    environment_training_rows = (
+        [row for row in training_rows if not row.get("collection_failure")]
+        if is_verified_collection
+        else training_rows
+    )
+    task_rows = per_task_results(environment_training_rows, task_splits)
+    handled_truncation_ids = handled_teacher_truncation_ids(meta, rows, audit, api)
+
+    def api_row_accepted(row: dict) -> bool:
+        return bool(
+            row.get("success")
+            or row.get("retry")
+            or (
+                row.get("trajectory_id") in handled_truncation_ids
+                and row.get("role") == "teacher"
+                and row.get("teacher_rejection_scope")
+                == "verified_sft_collection"
+                and row.get("error_type") == "TeacherOutputTruncatedError"
+                and row.get("error_reason") == "teacher_output_truncated"
+                and row.get("response_received") is True
+                and row.get("finish_reason") == "length"
+            )
+        )
+
     exit_path = run / "exit_code.txt"
     checks = {
         "process_success": exit_path.exists() and exit_path.read_text().strip() == "0",
@@ -89,14 +164,23 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
             for row in rows
         ),
         "thinking_disabled": tools["nonempty_thinking_events"] == 0,
-        "audit_covers_trajectories": {
+        "audit_covers_trajectories": (
+            {
+                row.get("trajectory_id")
+                for row in audit
+                if row.get("event") == "generation"
+            }
+            | handled_truncation_ids
+        )
+        == set(ids)
+        and {
             row.get("trajectory_id")
             for row in audit
             if row.get("event") == "generation"
         }
-        == set(ids),
+        <= set(ids),
         "api_no_terminal_failure": bool(api)
-        and all(row.get("success") or row.get("retry") for row in api),
+        and all(api_row_accepted(row) for row in api),
         "no_calls_after_terminal": terminal_behavior["passed"],
     }
     local_branch = {}
@@ -115,7 +199,8 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
         }
         allowed_ids = set(local_branch["allowed_auxiliary_trajectory_ids"])
         checks["audit_covers_trajectories"] = (
-            set(ids) <= generation_ids <= set(ids) | allowed_ids
+            set(ids) <= generation_ids | handled_truncation_ids
+            and generation_ids <= set(ids) | allowed_ids
         )
     if "reward_mode" in meta:
         reward_mode = meta.get("reward_mode")
@@ -649,6 +734,15 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
         read_epoch(run / "job_started.epoch"),
         read_epoch(run / "job_finished.epoch"),
     )
+    api_summary = summarize_api(api)
+    api_summary["handled_teacher_output_truncations"] = len(handled_truncation_ids)
+    api_summary["teacher_output_truncation_attempts"] = sum(
+        row.get("trajectory_id") in handled_truncation_ids
+        and row.get("role") == "teacher"
+        and row.get("teacher_rejection_scope") == "verified_sft_collection"
+        and row.get("error_reason") == "teacher_output_truncated"
+        for row in api
+    )
     summary = {
         "accepted": not errors and all(checks.values()),
         "metadata": meta,
@@ -661,7 +755,7 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
         },
         "tools": tools,
         "terminal_behavior": terminal_behavior,
-        "api": summarize_api(api),
+        "api": api_summary,
         "api_by_role": {
             role: summarize_api([row for row in api if row.get("role", "user") == role])
             for role in sorted({row.get("role", "user") for row in api})
@@ -675,6 +769,17 @@ def build_summary(run: Path) -> tuple[dict, list[dict]]:
         if start is not None and finish is not None
         else None,
     }
+    if is_verified_collection:
+        summary["verified_sft_collection"] = {
+            "completion_accepted": summary["accepted"],
+            "attempts_recorded": len(rows),
+            "environment_result_attempts": len(
+                [row for row in rows if not row.get("collection_failure")]
+            ),
+            "collection_failures": dict(sorted(collection_failures.items())),
+            "handled_teacher_output_truncations": len(handled_truncation_ids),
+            "sft_data_acceptance": "reported_by_build_verified_sft",
+        }
     return summary, task_rows
 
 

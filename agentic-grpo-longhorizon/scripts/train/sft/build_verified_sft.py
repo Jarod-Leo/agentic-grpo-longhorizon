@@ -23,6 +23,8 @@ def select_verified_records(records: list[dict], seen_ids: set[int], mode: str):
             reason = "other_mode"
         elif int(record.get("task_id", -1)) not in seen_ids or record.get("split") not in {"train", "seen"}:
             reason = "outside_train_split"
+        elif record.get("collection_failure"):
+            reason = f"collection_failure:{record['collection_failure']}"
         elif float(record.get("score", 0.0)) != 1.0:
             reason = "environment_failure"
         elif record.get("terminal_semantics") != "first_environment_done_v1":
@@ -31,8 +33,6 @@ def select_verified_records(records: list[dict], seen_ids: set[int], mode: str):
             reason = "invalid_success_termination"
         elif record.get("contaminated", False):
             reason = "contaminated"
-        elif record.get("collection_failure"):
-            reason = "collection_failure"
         elif not record.get("teacher_takeover", False):
             reason = "no_teacher_takeover"
         else:
